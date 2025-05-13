@@ -22,6 +22,7 @@ import os
 from huggingface_hub import snapshot_download
 
 from api.utils.file_utils import get_project_base_directory
+from deepdoc.vision.easyocr_wrapper.ocr import EasyOCR
 from rag.settings import PARALLEL_DEVICES
 from .operators import *  # noqa: F403
 from . import operators
@@ -527,7 +528,7 @@ class OCR:
                 model_dir = os.path.join(
                         get_project_base_directory(),
                         "rag/res/deepdoc")
-                
+
                 # Append muti-gpus task to the list
                 if PARALLEL_DEVICES is not None and PARALLEL_DEVICES > 0:
                     self.text_detector = []
@@ -543,7 +544,7 @@ class OCR:
                 model_dir = snapshot_download(repo_id="InfiniFlow/deepdoc",
                                               local_dir=os.path.join(get_project_base_directory(), "rag/res/deepdoc"),
                                               local_dir_use_symlinks=False)
-                
+
                 if PARALLEL_DEVICES is not None:
                     assert PARALLEL_DEVICES > 0, "Number of devices must be >= 1"
                     self.text_detector = []
@@ -704,3 +705,6 @@ class OCR:
         #    print(f"{bno}, {rec_res[bno]}")
 
         return list(zip([a.tolist() for a in filter_boxes], filter_rec_res))
+
+
+OCR = EasyOCR

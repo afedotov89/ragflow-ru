@@ -32,6 +32,7 @@ dependencies = [
     "demjson3==3.0.6",
     "discord-py==2.3.2",
     "duckduckgo-search>=7.2.0,<8.0.0",
+    "easyocr>=1.7.0",
     "editdistance==0.8.1",
     "elastic-transport==8.12.0",
     "elasticsearch==8.12.1",
@@ -100,6 +101,8 @@ dependencies = [
     "tencentcloud-sdk-python==3.0.1215",
     "tika==2.6.0",
     "tiktoken==0.7.0",
+    "torch==2.6.0",
+    "torchvision==0.21.0",
     "umap_learn==0.5.6",
     "vertexai==1.64.0",
     "volcengine==1.0.146",
@@ -108,7 +111,7 @@ dependencies = [
     "werkzeug==3.0.6",
     "wikipedia==1.4.0",
     "word2number==1.1",
-    "xgboost==1.5.0",
+    "xgboost>=2.0.0,<2.1.0",
     "xpinyin==0.7.6",
     "yfinance==0.1.96",
     "zhipuai==2.0.1",
@@ -136,7 +139,6 @@ full = [
     "fastembed>=0.3.6,<0.4.0; sys_platform == 'darwin' or platform_machine != 'x86_64'",
     "fastembed-gpu>=0.3.6,<0.4.0; sys_platform != 'darwin' and platform_machine == 'x86_64'",
     "flagembedding==1.2.10",
-    "torch>=2.5.0,<3.0.0",
     "transformers>=4.35.0,<5.0.0"
 ]
 
