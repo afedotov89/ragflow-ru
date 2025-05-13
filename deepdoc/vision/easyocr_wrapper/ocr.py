@@ -1,255 +1,20 @@
 from api.utils.file_utils import get_project_base_directory
-from deepdoc.vision.operators import cv2, logging, np
 from huggingface_hub import snapshot_download
-
 
 import cv2
 import easyocr
-print(f"easyocr module loaded from: {easyocr.__file__}") # DEBUGGING LINE
+# print(f"easyocr module loaded from: {easyocr.__file__}") # DEBUGGING LINE
 import numpy as np
 import torch
-
+from skimage.measure import label
 
 import hashlib
 import logging
 import os
 import time
 
-
-class ONNXDetector:
-    """
-    ONNX Implementation of EasyOCR detector
-    """
-    def __init__(self, model_path, use_gpu=True):
-        import onnxruntime as ort
-
-        # Configuration for ONNX Runtime session
-        options = ort.SessionOptions()
-        options.enable_cpu_mem_arena = False
-        options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-
-        # Determine compute provider
-        providers = []
-        if use_gpu:
-            # Try to use GPU
-            if 'CUDAExecutionProvider' in ort.get_available_providers():
-                # NVIDIA GPU
-                cuda_provider_options = {
-                    "device_id": 0,
-                    "gpu_mem_limit": 512 * 1024 * 1024,
-                    "arena_extend_strategy": "kNextPowerOfTwo",
-                }
-                providers.append(('CUDAExecutionProvider', cuda_provider_options))
-                logging.info("Using CUDA for ONNX detector")
-            elif 'CoreMLExecutionProvider' in ort.get_available_providers():
-                # Apple Silicon
-                providers.append('CoreMLExecutionProvider')
-                logging.info("Using CoreML for ONNX detector")
-            else:
-                logging.warning("GPU requested but no GPU provider available for ONNX Runtime")
-                providers.append('CPUExecutionProvider')
-        else:
-            providers.append('CPUExecutionProvider')
-
-        # Load the model
-        self.session = ort.InferenceSession(model_path, options=options, providers=providers)
-        self.input_name = self.session.get_inputs()[0].name
-        self.input_shape = self.session.get_inputs()[0].shape
-
-        # Define input and output shapes
-        logging.info(f"Detector input shape: {self.input_shape}")
-
-        # Configuration for detection
-        self.min_size = 3
-        self.text_threshold = 0.7
-        self.low_text = 0.4
-        self.link_threshold = 0.4
-
-    def detect(self, image):
-        """
-        Detect text regions in an image
-
-        Args:
-            image: Input image as numpy array (RGB)
-
-        Returns:
-            List of bounding boxes in format [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-        """
-        # Prepare image for detector
-        h, w = image.shape[:2]
-
-        # Scale image to model input shape
-        target_height, target_width = 640, 640  # Common size for detector
-        ratio_h, ratio_w = h / target_height, w / target_width
-        img_resized = cv2.resize(image, (target_width, target_height))
-
-        # Normalize image
-        img_norm = img_resized.astype(np.float32) / 255.0
-        img_norm = img_norm.transpose(2, 0, 1)  # HWC -> CHW
-        img_norm = np.expand_dims(img_norm, axis=0)  # Add batch dimension
-
-        # Run inference
-        outputs = self.session.run(None, {self.input_name: img_norm})
-
-        # Process model output
-        # Specific logic for processing detector outputs
-        boxes = []
-        # Simple implementation for example:
-        # Assume output is a confidence map where higher value = higher text probability
-        output_map = outputs[0][0]  # Take first feature map
-
-        # Threshold processing
-        binary_map = output_map > self.text_threshold
-
-        # Find contours
-        from skimage import measure
-        labels = measure.label(binary_map.astype(np.uint8))
-        regions = measure.regionprops(labels)
-
-        for region in regions:
-            # Filter out too small regions
-            if region.area < self.min_size:
-                continue
-
-            # Get bounding rectangle for region
-            min_row, min_col, max_row, max_col = region.bbox
-
-            # Scale back to original size
-            x1, y1 = min_col * ratio_w, min_row * ratio_h
-            x2, y2 = max_col * ratio_w, min_row * ratio_h
-            x3, y3 = max_col * ratio_w, max_row * ratio_h
-            x4, y4 = min_col * ratio_w, max_row * ratio_h
-
-            boxes.append([[x1, y1], [x2, y2], [x3, y3], [x4, y4]])
-
-        return boxes
-
-
-class ONNXRecognizer:
-    """
-    ONNX Implementation of EasyOCR recognizer
-    """
-    def __init__(self, model_path, vocab_path=None, use_gpu=True):
-        import onnxruntime as ort
-
-        # Configuration for ONNX Runtime session
-        options = ort.SessionOptions()
-        options.enable_cpu_mem_arena = False
-        options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-
-        # Determine compute provider
-        providers = []
-        if use_gpu:
-            # Try to use GPU
-            if 'CUDAExecutionProvider' in ort.get_available_providers():
-                # NVIDIA GPU
-                cuda_provider_options = {
-                    "device_id": 0,
-                    "gpu_mem_limit": 512 * 1024 * 1024,
-                    "arena_extend_strategy": "kNextPowerOfTwo",
-                }
-                providers.append(('CUDAExecutionProvider', cuda_provider_options))
-                logging.info("Using CUDA for ONNX recognizer")
-            elif 'CoreMLExecutionProvider' in ort.get_available_providers():
-                # Apple Silicon
-                providers.append('CoreMLExecutionProvider')
-                logging.info("Using CoreML for ONNX recognizer")
-            else:
-                logging.warning("GPU requested but no GPU provider available for ONNX Runtime")
-                providers.append('CPUExecutionProvider')
-        else:
-            providers.append('CPUExecutionProvider')
-
-        # Load the model
-        self.session = ort.InferenceSession(model_path, options=options, providers=providers)
-        self.input_name = self.session.get_inputs()[0].name
-        self.input_shape = self.session.get_inputs()[0].shape
-
-        # Define input and output shapes
-        logging.info(f"Recognizer input shape: {self.input_shape}")
-
-        # Load vocabulary if specified
-        self.vocab = None
-        if vocab_path:
-            with open(vocab_path, 'r', encoding='utf-8') as f:
-                self.vocab = f.read().splitlines()
-        else:
-            # Use standard vocabulary for English characters
-            self.vocab = list("0123456789abcdefghijklmnopqrstuvwxyz")
-
-    def recognize(self, image):
-        """
-        Recognize text in an image
-
-        Args:
-            image: Input image as numpy array (cropped text region, RGB)
-
-        Returns:
-            Recognized text string
-        """
-        # Prepare image for recognizer
-        # Usually requires fixed height and variable width image
-        h, w = image.shape[:2]
-        target_height = 48  # Standard height for recognizer
-
-        # Scale image preserving aspect ratio
-        ratio = target_height / h
-        target_width = int(w * ratio)
-
-        # Check minimum size
-        target_width = max(target_width, 16)  # Minimum width
-
-        # Resize image
-        img_resized = cv2.resize(image, (target_width, target_height))
-
-        # Normalize image
-        img_norm = img_resized.astype(np.float32) / 255.0
-        img_norm = img_norm.transpose(2, 0, 1)  # HWC -> CHW
-        img_norm = np.expand_dims(img_norm, axis=0)  # Add batch dimension
-
-        # Run inference
-        outputs = self.session.run(None, {self.input_name: img_norm})
-
-        # Process model output
-        # Assume output contains predictions for each character
-        predictions = outputs[0]
-
-        # Decode character sequence
-        # CTC decoding (simplified)
-        text = self._decode_prediction(predictions[0])
-
-        return text
-
-    def _decode_prediction(self, prediction):
-        """
-        Decode model prediction to text
-
-        Args:
-            prediction: Model output data
-
-        Returns:
-            Recognized text
-        """
-        # Find indices with maximum probability for each time step
-        indices = np.argmax(prediction, axis=1)
-
-        # Remove repeated indices
-        prev_index = -1
-        result_indices = []
-        for idx in indices:
-            if idx != prev_index:
-                result_indices.append(idx)
-                prev_index = idx
-
-        # Remove blank characters (usually index 0 or len(vocab))
-        blank_index = 0
-        result_indices = [idx for idx in result_indices if idx != blank_index]
-
-        # Convert indices to characters
-        text = ''.join([self.vocab[idx] if idx < len(self.vocab) else '' for idx in result_indices])
-
-        return text
-
+from .onnx_detector import ONNXDetector
+from .onnx_recognizer import ONNXRecognizer
 
 def load_onnx_model(model_dir, use_gpu=True, detector_name="craft_mlt_25k.onnx", recognizer_name=None):
     """
@@ -264,46 +29,41 @@ def load_onnx_model(model_dir, use_gpu=True, detector_name="craft_mlt_25k.onnx",
     Returns:
         Tuple of (detector, recognizer)
     """
-    # Check for model files
     det_path = os.path.join(model_dir, detector_name)
 
-    # If recognizer_name not specified, try to find it in the directory
     if recognizer_name is None:
-        # Look for any .onnx file that is not the detector model
         rec_files = [f for f in os.listdir(model_dir)
                     if f.endswith('.onnx') and f != detector_name]
         if rec_files:
             recognizer_name = rec_files[0]
             logging.info(f"Auto-detected recognizer model: {recognizer_name}")
         else:
-            raise FileNotFoundError(f"No recognizer model found in {model_dir}")
+            # Try a common default if auto-detection fails, or raise error
+            # This behavior depends on how robust you want it to be.
+            # For now, let's assume a common pattern or raise.
+            # Example default: recognizer_name = "cyrillic_g2.onnx" # Or based on expected languages
+            raise FileNotFoundError(f"No recognizer model found in {model_dir}, and auto-detection failed.")
 
     rec_path = os.path.join(model_dir, recognizer_name)
     vocab_path = os.path.join(model_dir, "vocab.txt")
 
     if not os.path.exists(det_path):
         raise FileNotFoundError(f"Detector model not found: {det_path}")
-
     if not os.path.exists(rec_path):
         raise FileNotFoundError(f"Recognizer model not found: {rec_path}")
 
-    # Load models
     detector = ONNXDetector(det_path, use_gpu=use_gpu)
-
     vocab_file = vocab_path if os.path.exists(vocab_path) else None
     recognizer = ONNXRecognizer(rec_path, vocab_path=vocab_file, use_gpu=use_gpu)
 
     return detector, recognizer
-
 
 class EasyOCR:
     """
     OCR implementation using EasyOCR library to support multiple languages including Russian.
     Maintains interface compatibility with the original OCR class.
     """
-    # Hugging Face repository for ONNX models
-    # Can be changed to your own repository if needed
-    ONNX_REPO_ID = "InfiniFlow/easyocr-onnx-models"
+    ONNX_REPO_ID = "afedotov/easyocr-onnx-models"
 
     def __init__(self, model_dir=None, languages=None, use_gpu=True, max_cache_size=100):
         """
@@ -316,40 +76,34 @@ class EasyOCR:
             max_cache_size: Maximum number of results to cache
         """
         try:
-            import easyocr
+            # import easyocr # Already imported at top
+            pass
         except ImportError:
             raise ImportError("EasyOCR is not installed. Please install it with pip install easyocr")
 
-        # Default languages if not specified
         if languages is None:
             languages = ['en', 'ru']
 
-        # Determine GPU usage
         gpu = use_gpu
         if use_gpu:
             try:
-                import torch
+                # import torch # Already imported at top
                 import platform
-
-                # Check for Apple M1/M2 Mac
                 if platform.system() == "Darwin" and platform.processor() == "arm":
-                    # Check MPS (Metal Performance Shaders) support
                     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                         gpu = True
                         logging.info("Using Apple Silicon GPU via MPS")
                     else:
                         gpu = False
-                        logging.warning("Apple Silicon GPU via MPS not available")
+                        logging.warning("Apple Silicon GPU via MPS not available, falling back to CPU for EasyOCR Reader.")
                 else:
-                    # Standard CUDA check
                     gpu = torch.cuda.is_available()
                     if not gpu:
-                        logging.warning("GPU requested but not available, falling back to CPU")
+                        logging.warning("GPU requested for EasyOCR Reader but not available, falling back to CPU")
             except ImportError:
                 gpu = False
-                logging.warning("PyTorch not available, falling back to CPU")
+                logging.warning("PyTorch not available, EasyOCR Reader will use CPU")
 
-        # Configure models directory
         download_dir = None
         if model_dir:
             download_dir = model_dir
@@ -360,585 +114,506 @@ class EasyOCR:
                     "rag/res/easyocr")
                 os.makedirs(download_dir, exist_ok=True)
             except Exception as e:
-                logging.warning(f"Failed to create model directory: {e}")
-                # Use default EasyOCR directory if project directory is not available
+                logging.warning(f"Failed to create model directory: {download_dir}. Error: {e}. EasyOCR will use its default.")
+                download_dir = None # Let EasyOCR handle its default path
 
-        # Initialize EasyOCR Reader first to get model paths
-        logging.info(f"Initializing EasyOCR with languages {languages}, GPU={gpu}")
+        logging.info(f"Initializing EasyOCR.Reader with languages {languages}, GPU={gpu}, model_storage_directory='{download_dir if download_dir else 'EasyOCR default'}'")
         self.reader = easyocr.Reader(
             languages,
-            gpu=gpu,
+            gpu=gpu, # This GPU flag is for the PyTorch backend of EasyOCR.Reader
             model_storage_directory=download_dir,
             download_enabled=True,
-            detector=True,
-            recognizer=True
+            detector=True, # Ensure PyTorch detector model is loaded/downloaded by Reader
+            recognizer=True # Ensure PyTorch recognizer model is loaded/downloaded by Reader
         )
 
-        # Automatic detection and use of ONNX models
         self.use_onnx = False
         self.onnx_detector = None
         self.onnx_recognizer = None
 
-        # Get original model names
+        # Determine default ONNX model names based on loaded PyTorch models by EasyOCR.Reader
+        # This makes it more dynamic if EasyOCR changes its internal model naming/selection.
         try:
-            detector_original = os.path.basename(self.reader.detector_path)
-            recognizer_original = os.path.basename(self.reader.recognizer_path)
+            detector_original_filename = os.path.basename(self.reader.detector_path)
+            recognizer_original_filename = os.path.basename(self.reader.recognizer_path)
 
-            # Expected ONNX model names (based on original names)
-            detector_onnx = os.path.splitext(detector_original)[0] + ".onnx"
-            recognizer_onnx = os.path.splitext(recognizer_original)[0] + ".onnx"
+            # Default ONNX names derived from original .pth files
+            default_detector_onnx = os.path.splitext(detector_original_filename)[0] + ".onnx"
+            default_recognizer_onnx = os.path.splitext(recognizer_original_filename)[0] + ".onnx"
 
-            logging.info(f"Original detector model: {detector_original}")
-            logging.info(f"Original recognizer model: {recognizer_original}")
-            logging.info(f"Expecting ONNX models: {detector_onnx} and {recognizer_onnx}")
+            logging.info(f"EasyOCR.Reader loaded PyTorch detector: {detector_original_filename} -> expecting ONNX: {default_detector_onnx}")
+            logging.info(f"EasyOCR.Reader loaded PyTorch recognizer: {recognizer_original_filename} -> expecting ONNX: {default_recognizer_onnx}")
+
         except Exception as e:
-            logging.warning(f"Could not get original model names: {e}")
-            detector_onnx = "craft_mlt_25k.onnx"
-            recognizer_onnx = "cyrillic_g2.onnx"
+            logging.warning(f"Could not determine ONNX model names from EasyOCR.Reader paths: {e}. Using fallback ONNX names.")
+            default_detector_onnx = "craft_mlt_25k.onnx" # Fallback
+            # Recognizer name can be language-dependent. Example for ru/en:
+            if 'ru' in languages and ('en' in languages or len(languages) == 1):
+                 default_recognizer_onnx = "cyrillic_g2.onnx" # Common for Russian or mixed Ru/En
+            elif 'en' in languages:
+                 default_recognizer_onnx = "english_g2.onnx" # Common for English
+            else: # Fallback for other languages or if primary is not 'ru' or 'en'
+                 default_recognizer_onnx = f"{languages[0]}_g2.onnx" # Generic guess
+            logging.info(f"Fallback ONNX detector: {default_detector_onnx}, Fallback ONNX recognizer: {default_recognizer_onnx}")
 
-        # Check for and initialize ONNX models
+
+        # --- ONNX Model Loading Logic ---
+        # This 'gpu' flag here is for ONNX Runtime provider selection
+        onnx_use_gpu = use_gpu # Separate variable to clarify its for ONNX, can be same as EasyOCR Reader's use_gpu
+
         try:
-            import onnxruntime as ort
+            import onnxruntime as ort # Already imported by onnx_detector/recognizer, but good for clarity here too
             from .converter import download_models_from_hf
 
-            # Check for local ONNX models
-            onnx_model_dir = os.path.join(download_dir, "onnx")
+            onnx_model_dir_base = download_dir if download_dir else os.path.join(get_project_base_directory(), "rag/res/easyocr")
+            onnx_model_dir = os.path.join(onnx_model_dir_base, "onnx")
             os.makedirs(onnx_model_dir, exist_ok=True)
 
-            # Check if expected models exist locally
-            det_path = os.path.join(onnx_model_dir, detector_onnx)
-            rec_path = os.path.join(onnx_model_dir, recognizer_onnx)
+            det_path_local = os.path.join(onnx_model_dir, default_detector_onnx)
+            rec_path_local = os.path.join(onnx_model_dir, default_recognizer_onnx)
+            vocab_path_local = os.path.join(onnx_model_dir, "vocab.txt") # vocab.txt is standard
 
-            models_exist = os.path.exists(det_path) and os.path.exists(rec_path)
+            models_exist_locally = os.path.exists(det_path_local) and \
+                                   os.path.exists(rec_path_local) and \
+                                   os.path.exists(vocab_path_local)
 
-            # If models not found locally, try to download from HF
-            if not models_exist:
+            if not models_exist_locally:
+                logging.info(f"Expected ONNX models or vocab not found locally in {onnx_model_dir}. Attempting download from HF: {self.ONNX_REPO_ID}")
                 try:
-                    logging.info(f"ONNX models not found locally, trying to download from {self.ONNX_REPO_ID}")
-                    onnx_model_dir = download_models_from_hf(self.ONNX_REPO_ID, onnx_model_dir)
+                    # download_models_from_hf downloads to a subdir of local_dir if repo has structure, or flat.
+                    # Ensure it returns the effective directory.
+                    effective_onnx_dir = download_models_from_hf(self.ONNX_REPO_ID, local_dir=onnx_model_dir)
+                    # Re-check paths in the potentially new directory structure from HF download
+                    det_path_local = os.path.join(effective_onnx_dir, default_detector_onnx)
+                    rec_path_local = os.path.join(effective_onnx_dir, default_recognizer_onnx)
+                    vocab_path_local = os.path.join(effective_onnx_dir, "vocab.txt") # Standard name
 
-                    # Check again if expected models exist after download
-                    det_path = os.path.join(onnx_model_dir, detector_onnx)
-                    rec_path = os.path.join(onnx_model_dir, recognizer_onnx)
-                    models_exist = os.path.exists(det_path) and os.path.exists(rec_path)
-
-                    if not models_exist:
-                        # Look for any ONNX models
-                        onnx_files = [f for f in os.listdir(onnx_model_dir) if f.endswith('.onnx')]
-                        if len(onnx_files) >= 2:
-                            logging.info(f"Found alternative ONNX models: {onnx_files}")
+                    models_exist_locally = os.path.exists(det_path_local) and \
+                                           os.path.exists(rec_path_local) and \
+                                           os.path.exists(vocab_path_local)
+                    if models_exist_locally:
+                         logging.info(f"ONNX models and vocab found after download in {effective_onnx_dir}.")
+                    else:
+                         logging.warning(f"Expected ONNX models ({default_detector_onnx}, {default_recognizer_onnx}) or vocab.txt still not found after download attempt from {self.ONNX_REPO_ID} into {effective_onnx_dir}.")
+                         # load_onnx_model will try auto-detection next if specific files aren't found.
                 except Exception as e:
-                    logging.warning(f"Failed to download ONNX models: {e}")
+                    logging.error(f"Failed to download ONNX models from Hugging Face: {e}. Will proceed to attempt loading with any existing ONNX files or fail.")
 
-            # Try to load ONNX models
+            # Attempt to load ONNX models (either specific or auto-detected by load_onnx_model)
             try:
-                if models_exist:
-                    # Load with exact model names
-                    self.onnx_detector, self.onnx_recognizer = load_onnx_model(
-                        onnx_model_dir,
-                        use_gpu=gpu,
-                        detector_name=detector_onnx,
-                        recognizer_name=recognizer_onnx
-                    )
-                    self.use_onnx = True
-                    logging.info(f"Using ONNX models: {detector_onnx} and {recognizer_onnx}")
-                else:
-                    # Try auto-detection
-                    logging.info("Trying automatic ONNX model detection...")
-                    self.onnx_detector, self.onnx_recognizer = load_onnx_model(
-                        onnx_model_dir,
-                        use_gpu=gpu
-                    )
-                    self.use_onnx = True
-                    logging.info("Successfully loaded ONNX models through auto-detection")
-            except Exception as e:
-                logging.error(f"Failed to load ONNX models: {e}")
+                # If specific models were found (locally or downloaded), load_onnx_model will use them.
+                # If not, load_onnx_model's auto-detection for recognizer_name will kick in.
+                self.onnx_detector, self.onnx_recognizer = load_onnx_model(
+                    onnx_model_dir, # Directory to search for models
+                    use_gpu=onnx_use_gpu, # GPU flag for ONNX Runtime
+                    detector_name=default_detector_onnx, # Provide expected detector
+                    recognizer_name=default_recognizer_onnx if os.path.exists(rec_path_local) else None # Provide expected recognizer if it exists, else let load_onnx_model auto-detect
+                )
+                self.use_onnx = True
+                # To know exactly which models were loaded if auto-detection was used, ONNXDetector/Recognizer should log their input paths.
+                logging.info(f"Successfully initialized ONNX models. Detector: {self.onnx_detector.input_name if self.onnx_detector else 'Failed'}, Recognizer: {self.onnx_recognizer.input_name if self.onnx_recognizer else 'Failed'}.")
+            except FileNotFoundError as fnf_e:
+                 logging.warning(f"ONNX FileNotFoundError during load_onnx_model: {fnf_e}. ONNX setup failed. Falling back to PyTorch.")
+                 self.use_onnx = False
+            except Exception as e_load:
+                logging.error(f"Failed to load ONNX models: {e_load}. Trace: {e_load.with_traceback(None)}. ONNX setup failed. Falling back to PyTorch.")
+                self.use_onnx = False
+
         except ImportError:
-            logging.warning("ONNX Runtime not available, using PyTorch models")
-        except Exception as e:
-            logging.warning(f"Error checking ONNX models: {e}")
+            logging.warning("ONNX Runtime not available. EasyOCR will use PyTorch models (slower).")
+            self.use_onnx = False
+        except Exception as e_outer_onnx:
+            logging.error(f"Outer error during ONNX setup: {e_outer_onnx}. Falling back to PyTorch.")
+            self.use_onnx = False
 
-        # For compatibility with the original OCR class
+        if not self.use_onnx:
+            logging.info("Using PyTorch backend for EasyOCR.")
+        else:
+            logging.info("Using ONNX backend for EasyOCR.")
+
         self.drop_score = 0.5
-
-        # Thread-safe cache with size limit
         from collections import OrderedDict
         from threading import RLock
         self._max_cache_size = max_cache_size
         self._cache_lock = RLock()
         self._cache = OrderedDict()
-        self.crop_image_res_index = 0  # For compatibility with original OCR
+        self.crop_image_res_index = 0
 
     def _cache_put(self, key, value):
-        """Thread-safe cache insertion with size limit"""
         with self._cache_lock:
-            # If cache is full, remove oldest item
             if len(self._cache) >= self._max_cache_size:
                 self._cache.popitem(last=False)
             self._cache[key] = value
 
     def _cache_get(self, key):
-        """Thread-safe cache retrieval"""
         with self._cache_lock:
             if key in self._cache:
-                # Move accessed item to end (most recently used)
                 value = self._cache.pop(key)
                 self._cache[key] = value
                 return value
             return None
 
     def _generate_cache_key(self, img):
-        """Generate a cache key for an image using a memory-efficient approach"""
-        if img is None:
-            return None
-        # Use image shape and a sample of pixels instead of the full image bytes
+        if img is None: return None
         shape = img.shape
-        # Sample pixels from different regions of the image
-        sample_size = min(1000, img.size // 10)  # Limit sample size
-        step = max(1, img.size // sample_size)
+        sample_size = min(1000, img.size // 10)
+        step = max(1, img.size // sample_size if sample_size > 0 else img.size + 1) # Avoid step=0 if img.size is small
         samples = img.ravel()[::step]
-        # Create a hash from the shape and samples
-        import hashlib
         m = hashlib.md5()
         m.update(str(shape).encode())
         m.update(samples.tobytes())
         return m.hexdigest()
 
     def _ensure_rgb(self, img):
-        """
-        Ensure image is in RGB format for EasyOCR processing
-
-        Args:
-            img: Input image
-
-        Returns:
-            RGB version of the image
-        """
-        if img is None:
-            return None
-
-        # Check if image is empty
+        if img is None: return None
         if img.size == 0:
             logging.warning("Empty image provided to _ensure_rgb")
-            return None
-
-        # Check if image has 3 channels (color image)
+            return None # Or an empty image of expected type
         if len(img.shape) == 3 and img.shape[2] == 3:
-            # OpenCV uses BGR, convert to RGB
             return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        # Grayscale or other format, no need to convert
-        return img
+        # If grayscale and PyTorch reader needs 3 channels, it usually handles it.
+        # If grayscale and ONNX model needs 3 channels, it should be handled before ONNX model.
+        # ONNXDetector handles replication if needed. ONNXRecognizer expects grayscale.
+        return img # Return as is; specific converters handle channel needs.
 
     def sorted_boxes(self, dt_boxes):
-        """
-        Sort text boxes in order from top to bottom, left to right.
-        This method is copied from the original OCR implementation to maintain compatibility.
-
-        Args:
-            dt_boxes: Detected text boxes
-
-        Returns:
-            Sorted boxes
-        """
-        if not dt_boxes or len(dt_boxes) == 0:
+        if not dt_boxes: # Handles None or empty list
             return []
+        try:
+            # Ensure all elements are list/array-like for consistent access
+            # And that they have at least one point with two coordinates
+            if not all(isinstance(b, (list, np.ndarray)) and len(b) > 0 and isinstance(b[0], (list, np.ndarray)) and len(b[0]) == 2 for b in dt_boxes):
+                logging.warning(f"Inconsistent structure in dt_boxes for sorting. Attempting to filter valid boxes. Original: {dt_boxes}")
+                # Filter out malformed boxes before sorting
+                valid_boxes = []
+                for b in dt_boxes:
+                    if isinstance(b, (list, np.ndarray)) and len(b) > 0 and isinstance(b[0], (list, np.ndarray)) and len(b[0]) == 2:
+                         # Further check if all 4 points exist if that's the expectation for x[0][1]
+                         if len(b) == 4 and all(isinstance(p, (list, np.ndarray)) and len(p) == 2 for p in b):
+                            valid_boxes.append(b)
+                         elif len(b) > 0 : # if it's just one point, sorting key might still work if it's [[x,y]]
+                            valid_boxes.append(b) # This might be too lenient for the key x[0][1]
+                    else:
+                        logging.debug(f"Skipping malformed box during sort preprocessing: {b}")
+                dt_boxes = valid_boxes
+                if not dt_boxes: return []
 
-        num_boxes = len(dt_boxes)
-        sorted_boxes = sorted(dt_boxes, key=lambda x: (x[0][1], x[0][0]))
-        _boxes = list(sorted_boxes)
+            _boxes = sorted(dt_boxes, key=lambda x: (x[0][1], x[0][0])) # Initial sort
+            num_boxes = len(_boxes)
 
-        for i in range(num_boxes - 1):
-            for j in range(i, -1, -1):
-                if j + 1 < len(_boxes) and abs(_boxes[j + 1][0][1] - _boxes[j][0][1]) < 10 and \
-                        (_boxes[j + 1][0][0] < _boxes[j][0][0]):
-                    tmp = _boxes[j]
-                    _boxes[j] = _boxes[j + 1]
-                    _boxes[j + 1] = tmp
-                else:
-                    break
-        return _boxes
+            for i in range(num_boxes - 1):
+                for j in range(i, -1, -1): # Iterate backwards from i
+                    if j + 1 < num_boxes:
+                        # Condition from original logic
+                        if abs(_boxes[j + 1][0][1] - _boxes[j][0][1]) < 10 and \
+                           (_boxes[j + 1][0][0] < _boxes[j][0][0]):
+                            # Swap
+                            tmp = _boxes[j]
+                            _boxes[j] = _boxes[j + 1]
+                            _boxes[j + 1] = tmp
+                        else:
+                            # Inner loop condition not met, break to next i
+                            break
+            return _boxes # Ensure _boxes is returned after the loops complete
+        except Exception as e:
+            logging.error(f"Error during box sorting: {e}. Input boxes: {dt_boxes}")
+            return dt_boxes # Return original on error to avoid crash
 
     def detect(self, img, device_id=None):
-        """
-        Detect text in an image without full recognition.
-        For compatibility with the original OCR class.
-
-        Args:
-            img: Input image as numpy array
-            device_id: For compatibility with original interface
-
-        Returns:
-            Iterator of (box, ("", 0)) pairs and time_dict with timing info
-        """
-        if device_id is None:
-            device_id = 0
-
         time_dict = {'det': 0, 'rec': 0, 'cls': 0, 'all': 0}
-
         if img is None:
-            return None, None, time_dict
+            return zip([], []), time_dict
 
-        # Generate a cache key for this image
         cache_key = self._generate_cache_key(img)
-        cached_result = self._cache_get(f"detect_{cache_key}")
-        if cached_result:
-            # Return cached result
-            if logging.getLogger().isEnabledFor(logging.DEBUG):
-                logging.debug("Using cached detection results")
-            boxes, timing = cached_result
-            time_dict['det'] = timing
-            time_dict['all'] = timing
-            return zip(boxes, [("", 0) for _ in range(len(boxes))])
+        if cache_key:
+            cached_result = self._cache_get(f"detect_{cache_key}")
+            if cached_result:
+                boxes, timing = cached_result
+                time_dict['det'] = timing
+                time_dict['all'] = timing
+                logging.debug(f"Cache hit for detect: {cache_key}") # Restored debug
+                return zip(boxes, [("", 0.0) for _ in range(len(boxes))]), time_dict
 
-        start = time.time()
+        start_time = time.time()
+        img_processed = self._ensure_rgb(img) # Ensure RGB for PyTorch, ONNX detector handles its needs.
+        if img_processed is None:
+            return zip([], []), time_dict
 
-        # Convert to RGB for processing
-        img_rgb = self._ensure_rgb(img)
-        if img_rgb is None:
-            time_dict['all'] = 0
-            return None, None, time_dict
-
-        # Perform detection
+        boxes = []
         if self.use_onnx and self.onnx_detector:
-            # Use ONNX model for detection
-            boxes = self.onnx_detector.detect(img_rgb)
+            boxes = self.onnx_detector.detect(img_processed) # ONNXDetector expects RGB
         else:
-            # Use PyTorch model from EasyOCR
-            results = self.reader.readtext(img_rgb)
-            boxes = [box for box, _, _ in results]
+            try:
+                # EasyOCR Reader's `detect` method has a complex return: (horizontal_list, free_list), score
+                # Using `readtext` with detail=0 or extracting boxes from detail=1 is more straightforward
+                # for getting a list of boxes.
+                results_pytorch = self.reader.readtext(img_processed, detail=0, paragraph=False) # Returns list of boxes
+                boxes = results_pytorch # Ensure this is a list of box coordinates
+            except Exception as e:
+                logging.error(f"PyTorch EasyOCR.Reader.readtext (for detection) failed: {e}")
+                boxes = []
 
-        end = time.time()
-        timing = end - start
-        time_dict['det'] = timing
-        time_dict['all'] = timing
+        detection_time = time.time() - start_time
+        time_dict['det'] = detection_time
+        time_dict['all'] = detection_time
 
-        # Sort boxes in a similar way to the original OCR's sorted_boxes method
-        sorted_boxes = self.sorted_boxes(boxes)
+        sorted_boxes_list = self.sorted_boxes(boxes if boxes else [])
 
-        # Cache the result
-        self._cache_put(f"detect_{cache_key}", (sorted_boxes, timing))
+        if cache_key:
+            logging.debug(f"Caching result for detect: {cache_key}") # Restored debug
+            self._cache_put(f"detect_{cache_key}", (sorted_boxes_list, detection_time))
 
-        return zip(sorted_boxes, [("", 0) for _ in range(len(sorted_boxes))])
+        return zip(sorted_boxes_list, [("", 0.0) for _ in range(len(sorted_boxes_list))]), time_dict
 
     def get_rotate_crop_image(self, img, points):
-        """
-        Crop and potentially rotate an image based on the given points.
-        This method is copied from the original OCR implementation to maintain compatibility.
-        """
         if img is None or points is None:
-            logging.warning("Null image or points provided to get_rotate_crop_image")
-            raise ValueError("Image or points cannot be None")
+            raise ValueError("Image or points cannot be None for get_rotate_crop_image")
 
         if not isinstance(points, np.ndarray):
-            points = np.array(points, dtype=np.float32)
+            points_arr = np.array(points, dtype=np.float32)
+        else:
+            points_arr = points.astype(np.float32)
 
-        # This assert follows the original implementation
-        assert len(points) == 4, "shape of points must be 4*2"
+        if points_arr.shape != (4, 2):
+            if points_arr.size == 8: # Attempt to reshape if flat list of 8 coordinates
+                try: points_arr = points_arr.reshape((4,2))
+                except ValueError: raise ValueError(f"Points array size 8 but cannot reshape to (4,2). Original shape: {points_arr.shape}")
+            else: raise ValueError(f"Shape of points must be 4x2. Got {points_arr.shape}")
 
-        img_crop_width = int(
-            max(
-                np.linalg.norm(points[0] - points[1]),
-                np.linalg.norm(points[2] - points[3])))
-        img_crop_height = int(
-            max(
-                np.linalg.norm(points[0] - points[3]),
-                np.linalg.norm(points[1] - points[2])))
+        w_crop = int(max(np.linalg.norm(points_arr[0] - points_arr[1]), np.linalg.norm(points_arr[2] - points_arr[3])))
+        h_crop = int(max(np.linalg.norm(points_arr[0] - points_arr[3]), np.linalg.norm(points_arr[1] - points_arr[2])))
 
-        # Check for very small crops which may cause issues
-        if img_crop_width < 5 or img_crop_height < 5:
-            logging.warning(f"Very small crop requested: {img_crop_width}x{img_crop_height}")
+        w_crop = max(1, w_crop) # Ensure at least 1 pixel
+        h_crop = max(1, h_crop)
 
-        pts_std = np.float32([[0, 0], [img_crop_width, 0],
-                            [img_crop_width, img_crop_height],
-                            [0, img_crop_height]])
-        M = cv2.getPerspectiveTransform(points, pts_std)
-        dst_img = cv2.warpPerspective(
-            img,
-            M, (img_crop_width, img_crop_height),
-            borderMode=cv2.BORDER_REPLICATE,
-            flags=cv2.INTER_CUBIC)
-        dst_img_height, dst_img_width = dst_img.shape[0:2]
-        if dst_img_height * 1.0 / dst_img_width >= 1.5:
+        pts_std = np.float32([[0,0],[w_crop,0],[w_crop,h_crop],[0,h_crop]])
+
+        try:
+            M = cv2.getPerspectiveTransform(points_arr, pts_std)
+        except cv2.error as e: # Catch OpenCV specific errors
+            logging.error(f"cv2.getPerspectiveTransform failed: {e}. Points: {points_arr}, Target: {pts_std}")
+            # Return a minimal black image of the target size
+            num_channels = img.shape[2] if len(img.shape) == 3 else 1
+            return np.zeros((h_crop, w_crop, num_channels) if num_channels > 1 else (h_crop, w_crop), dtype=img.dtype)
+
+        dst_img = cv2.warpPerspective(img, M, (w_crop, h_crop), borderMode=cv2.BORDER_REPLICATE, flags=cv2.INTER_CUBIC)
+
+        dst_h, dst_w = dst_img.shape[0:2]
+        if dst_h * 1.0 / max(1, dst_w) >= 1.5: # Avoid division by zero
             dst_img = np.rot90(dst_img)
         return dst_img
 
     def recognize(self, ori_im, box, device_id=None):
-        """
-        Recognize text in a specific bounding box of an image.
+        if ori_im is None or box is None: return None
 
-        Args:
-            ori_im: Original image as numpy array
-            box: Coordinates of the bounding box [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-            device_id: For compatibility with original interface
-
-        Returns:
-            Recognized text string
-        """
-        if device_id is None:
-            device_id = 0
-
-        if ori_im is None or box is None:
-            return ""
-
-        # Generate cache key
-        box_hash = hash(str(box))
         img_key = self._generate_cache_key(ori_im)
+        box_str = "_".join(map(str, np.array(box).astype(int).flatten())) # Consistent box string for key
+        cache_key = None
         if img_key:
-            cache_key = f"recognize_{img_key}_{box_hash}"
-            cached_result = self._cache_get(cache_key)
-            if cached_result:
-                if logging.getLogger().isEnabledFor(logging.DEBUG):
-                    logging.debug("Using cached recognition result")
-                return cached_result
+            cache_key = f"recognize_{img_key}_{box_str}"
+            cached_val = self._cache_get(cache_key)
+            if cached_val: return cached_val
 
-        # Convert box to numpy array if it's not already
-        if not isinstance(box, np.ndarray):
-            box = np.array(box, dtype=np.float32)
+        try:
+            img_crop = self.get_rotate_crop_image(ori_im, box)
+            logging.debug(f"Recognize: Cropped image shape for {box_str}: {img_crop.shape if img_crop is not None else 'None'}") # Restored debug
+        except ValueError as e: # Catch error from get_rotate_crop_image
+            logging.error(f"Failed to crop image for recognition: {e}")
+            return None
 
-        # First, get a cropped image using the same cropping method as original OCR
-        img_crop = self.get_rotate_crop_image(ori_im, box)
+        if img_crop is None or img_crop.size == 0:
+            logging.warning("Cropped image for recognition is empty.")
+            return None
 
-        # Convert to RGB for processing
-        img_rgb = self._ensure_rgb(img_crop)
+        # _ensure_rgb for PyTorch. ONNXRecognizer handles its own grayscale conversion.
+        # PyTorch Reader's recognizer also handles grayscale/RGB input.
+        img_crop_processed = self._ensure_rgb(img_crop)
 
-        # Recognize text in the cropped image
+        text, confidence = "", 0.0
         if self.use_onnx and self.onnx_recognizer:
-            # Use ONNX model for recognition
-            text = self.onnx_recognizer.recognize(img_rgb)
-            results = [(None, text, 1.0)] if text else []
+            text = self.onnx_recognizer.recognize(img_crop_processed) # ONNXRecognizer expects RGB/Grayscale, handles internally
+            confidence = 1.0 if text else 0.0 # Basic confidence for ONNX
         else:
-            # Use PyTorch model from EasyOCR
-            results = self.reader.readtext(img_rgb)
+            try:
+                # reader.recognize is complex; reader.readtext on crop is simpler
+                pt_results = self.reader.readtext(img_crop_processed, detail=1, paragraph=False)
+                if pt_results:
+                    text, confidence = pt_results[0][1], pt_results[0][2] # Get text and conf from first result
+            except Exception as e:
+                logging.error(f"PyTorch EasyOCR.Reader.readtext (for recognition) failed: {e}")
 
-        # If no text was found, return empty string
-        if not results:
-            return ""
+        result_tuple = (text, confidence) if confidence >= self.drop_score else None
 
-        # Combine all detected text with spaces
-        # (There might be multiple text blocks in the cropped image)
-        texts = []
-        for _, text, confidence in results:
-            if confidence >= self.drop_score:
-                texts.append(text)
-
-        combined_text = " ".join(texts)
-
-        # Cache the result
-        if img_key:
-            self._cache_put(cache_key, combined_text)
-
-        return combined_text
+        if cache_key: self._cache_put(cache_key, result_tuple)
+        return result_tuple
 
     def recognize_batch(self, img_list, device_id=None):
-        """
-        Recognize text in a batch of images.
+        if not img_list: return []
 
-        Args:
-            img_list: List of images as numpy arrays (cropped text regions)
-            device_id: For compatibility with original interface
-
-        Returns:
-            List of recognized text strings
-        """
-        if device_id is None:
-            device_id = 0
-
-        if not img_list:
-            return []
-
-        texts = []
-
-        for img in img_list:
-            if img is None:
-                texts.append("")
+        batch_output = []
+        for img_crop_item in img_list:
+            if img_crop_item is None or img_crop_item.size == 0:
+                logging.debug("Recognize_batch: Skipping None or empty crop item.") # Restored debug
+                batch_output.append(None)
                 continue
 
-            # Try to find in cache first
-            cache_key = self._generate_cache_key(img)
-            if cache_key:
-                cached_result = self._cache_get(f"recognize_batch_{cache_key}")
-                if cached_result:
-                    if logging.getLogger().isEnabledFor(logging.DEBUG):
-                        logging.debug("Using cached batch recognition result")
-                    texts.append(cached_result)
-                    continue
+            # Individual caching for each crop in the batch context
+            # `recognize` method has its own internal caching, but this is for `recognize_batch` context
+            # if we were to bypass full `recognize` method for some reason.
+            # For simplicity, let's call the single `recognize` method for each, which handles caching.
+            # This means we don't need a separate cache layer here IF `recognize` is robust.
+            # However, the original `recognize_batch` in `EasyOCR` class did not call `self.recognize`.
+            # It had its own logic. Replicating that slightly:
 
-            # Convert to RGB for processing
-            img_rgb = self._ensure_rgb(img)
-            if img_rgb is None:
-                texts.append("")
+            key_crop_batch = self._generate_cache_key(img_crop_item)
+            cached_crop_res = None
+            if key_crop_batch:
+                cached_crop_res = self._cache_get(f"rec_batch_crop_{key_crop_batch}")
+                if cached_crop_res: logging.debug(f"Recognize_batch: Cache hit for crop {key_crop_batch[:10]}...") # Restored debug
+
+            if cached_crop_res:
+                batch_output.append(cached_crop_res)
                 continue
 
-            # Recognize text
+            # Processed for recognizer (RGB/Grayscale handled by downstream)
+            img_crop_proc = self._ensure_rgb(img_crop_item)
+
+            current_text, current_conf = "", 0.0
             if self.use_onnx and self.onnx_recognizer:
-                # Use ONNX model for recognition
-                try:
-                    text = self.onnx_recognizer.recognize(img_rgb)
-                    results = [(None, text, 1.0)] if text else []
-                except Exception as e:
-                    logging.error(f"Error with ONNX recognition: {e}")
-                    results = []
+                current_text = self.onnx_recognizer.recognize(img_crop_proc)
+                current_conf = 1.0 if current_text else 0.0
             else:
-                # Use PyTorch model from EasyOCR
                 try:
-                    results = self.reader.readtext(img_rgb)
-                except Exception as e:
-                    logging.error(f"Error with EasyOCR recognition: {e}")
-                    results = []
+                    pt_rec_results = self.reader.readtext(img_crop_proc, detail=1, paragraph=False)
+                    if pt_rec_results:
+                        current_text, current_conf = pt_rec_results[0][1], pt_rec_results[0][2]
+                except Exception as e_rec_batch:
+                    logging.error(f"PyTorch recognition in batch failed for a crop: {e_rec_batch}")
 
-            # Extract text with confidence above threshold
-            img_texts = []
-            for _, text, confidence in results:
-                if confidence >= self.drop_score:
-                    img_texts.append(text)
+            final_crop_result = (current_text, current_conf) if current_conf >= self.drop_score else None
 
-            # Join multiple detected texts with spaces or use empty string if none found
-            text = " ".join(img_texts) if img_texts else ""
+            if key_crop_batch:
+                logging.debug(f"Recognize_batch: Caching result for crop {key_crop_batch[:10]}...") # Restored debug
+                self._cache_put(f"rec_batch_crop_{key_crop_batch}", final_crop_result)
+            batch_output.append(final_crop_result)
 
-            # Cache the result
-            if cache_key:
-                self._cache_put(f"recognize_batch_{cache_key}", text)
+        return batch_output
 
-            texts.append(text)
-
-        return texts
-
-    def __call__(self, img, device_id=0, cls=True):
-        """
-        Process an image with OCR to detect and recognize text.
-
-        Args:
-            img: Input image as numpy array (BGR format from OpenCV)
-            device_id: For compatibility with original OCR interface
-            cls: For compatibility with original OCR interface
-
-        Returns:
-            List of tuples (box_coords, (text, confidence)), time_dict with timing info
-        """
-        time_dict = {'det': 0, 'rec': 0, 'cls': 0, 'all': 0}
-
+    def __call__(self, img, device_id=0, cls=True): # cls is unused
+        time_dict = {'det': 0, 'rec': 0, 'all': 0}
         if img is None:
+            return None, None, time_dict # Maintain (results, time_dict) structure for return
+
+        full_cache_key = self._generate_cache_key(img)
+        if full_cache_key:
+            cached_data = self._cache_get(f"call_{full_cache_key}")
+            if cached_data:
+                # Expect cached_data to be (list_of_results, all_time_float)
+                res_list, all_t = cached_data
+                time_dict['all'] = all_t
+                # Approximate det/rec times if not stored, or if complex to store them from cache
+                time_dict['det'] = all_t * 0.5 # Generic approximation
+                time_dict['rec'] = all_t * 0.5
+                logging.debug(f"Full __call__ cache hit for {full_cache_key}") # Restored debug
+                return res_list, time_dict
+
+
+        overall_start_time = time.time()
+
+        # Detection part
+        # `detect` method returns (zip_iterator, time_dict_det)
+        # We need the boxes from the zip_iterator.
+        det_results_iter, time_dict_det = self.detect(img) # device_id passed for API compat, not used by self.detect
+        time_dict['det'] = time_dict_det['det'] # Get actual detection time
+
+        detected_boxes = [item[0] for item in det_results_iter] # Extract boxes
+
+        if not detected_boxes:
+            time_dict['all'] = time.time() - overall_start_time
             return None, None, time_dict
 
-        # Generate a cache key for this image
-        cache_key = self._generate_cache_key(img)
-        if cache_key:
-            cached_result = self._cache_get(f"call_{cache_key}")
-            if cached_result:
-                # Return cached result
-                if logging.getLogger().isEnabledFor(logging.DEBUG):
-                    logging.debug("Using cached OCR results")
-                formatted_results, timing = cached_result
-                time_dict['all'] = timing
-                time_dict['det'] = timing * 0.7  # Approximation
-                time_dict['rec'] = timing * 0.3  # Approximation
-                return formatted_results
+        # Recognition part (on sorted boxes from `detect` which internally sorts)
+        # `detect` method already sorted the boxes.
+        ocr_final_results = []
+        recognition_start_time = time.time()
 
-        start = time.time()
+        # Pass original BGR image to `recognize` as it handles `_ensure_rgb` and `get_rotate_crop_image`
+        for box_item in detected_boxes: # `detected_boxes` from `self.detect` are already sorted
+            rec_tuple = self.recognize(img, box_item) # `img` is original BGR
+            if rec_tuple: # If (text, confidence) is not None
+                # Defensive check for the structure of rec_tuple
+                if not isinstance(rec_tuple, tuple) or len(rec_tuple) != 2:
+                    logging.error(f"EasyOCR.__call__: UNEXPECTED structure for recognition_tuple: {rec_tuple}, type: {type(rec_tuple)}. Box: {box_item}. Skipping this result.")
+                    continue # Skip this problematic result
 
-        # Convert to RGB for processing
-        img_rgb = self._ensure_rgb(img)
-        if img_rgb is None:
+                # Further check element types if desired, e.g., text is str, confidence is float
+                # For now, the main check is that it's a 2-element tuple.
+
+                ocr_final_results.append((box_item, rec_tuple))
+
+        time_dict['rec'] = time.time() - recognition_start_time
+        time_dict['all'] = time.time() - overall_start_time
+        logging.debug(f"__call__ execution times: Det: {time_dict['det']:.4f}s, Rec: {time_dict['rec']:.4f}s, All: {time_dict['all']:.4f}s") # Restored debug
+
+        if full_cache_key:
+            self._cache_put(f"call_{full_cache_key}", (ocr_final_results, time_dict['all']))
+            logging.debug(f"Full __call__ result cached for {full_cache_key}") # Restored debug
+
+        if not ocr_final_results:
             return None, None, time_dict
 
-        if self.use_onnx and self.onnx_detector and self.onnx_recognizer:
-            # Use ONNX models
-            # Detection
-            det_start = time.time()
-            boxes = self.onnx_detector.detect(img_rgb)
-            det_end = time.time()
+        return ocr_final_results, time_dict
 
-            # Text recognition for each box
-            rec_start = time.time()
-            results = []
-            for box in boxes:
-                # Crop and recognize text
-                img_crop = self.get_rotate_crop_image(img, box)
-                img_rgb_crop = self._ensure_rgb(img_crop)
-                text = self.onnx_recognizer.recognize(img_rgb_crop)
-                confidence = 1.0  # ONNX models may not return confidence
-                results.append((box, text, confidence))
-            rec_end = time.time()
-
-            time_dict['det'] = det_end - det_start
-            time_dict['rec'] = rec_end - rec_start
-        else:
-            # Use standard EasyOCR
-            results = self.reader.readtext(img_rgb)
-
-        # Convert results to the format expected by the original OCR class
-        formatted_results = []
-        for box_coords, text, confidence in results:
-            # Only include results with confidence above threshold
-            if confidence >= self.drop_score:
-                # Convert box_coords format to match original OCR:
-                # EasyOCR returns [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-                # which is the same format expected by the original OCR
-                formatted_results.append((box_coords, (text, confidence)))
-
-        end = time.time()
-        timing = end - start
-        time_dict['all'] = timing
-        # Set approximate timings for compatibility if not explicitly defined
-        if 'det' not in time_dict or time_dict['det'] == 0:
-            time_dict['det'] = timing * 0.7  # Approximation
-        if 'rec' not in time_dict or time_dict['rec'] == 0:
-            time_dict['rec'] = timing * 0.3  # Approximation
-
-        # Cache the result
-        if cache_key:
-            self._cache_put(f"call_{cache_key}", (formatted_results, timing))
-
-        if not formatted_results:
-            return None, None, time_dict
-
-        return formatted_results
 
     def clear_cache(self):
-        """Clear the internal cache to free memory"""
         with self._cache_lock:
             self._cache.clear()
             logging.info("EasyOCR cache cleared")
 
     def _convert_to_onnx_models(self, output_dir=None, upload_to_hf=False, hf_repo_id=None, hf_token=None):
-        """
-        Convert PyTorch models to ONNX format for better performance (internal method)
-
-        Args:
-            output_dir: Directory to save ONNX models
-            upload_to_hf: Whether to upload models to Hugging Face
-            hf_repo_id: Hugging Face repository ID
-            hf_token: Hugging Face API token
-
-        Returns:
-            Path to output directory
-        """
         if self.use_onnx:
-            logging.warning("Already using ONNX models, conversion not needed")
-            return None
+            logging.warning("Already configured to use ONNX, or ONNX conversion was already attempted. Conversion not re-initiated.")
+            return None # Or path to existing ONNX dir if known
 
         from .converter import convert_to_onnx
+        languages_for_conversion = self.reader.lang_list
 
-        # Get languages from reader
-        languages = self.reader.lang_list
+        # Determine GPU for conversion process (can be different from runtime use_gpu)
+        conversion_use_gpu = True # Or make this a parameter
 
-        # Convert models
-        result = convert_to_onnx(
-            languages=languages,
+        # Default output directory for conversion if not provided
+        if output_dir is None:
+            try:
+                proj_base = get_project_base_directory()
+                output_dir = os.path.join(proj_base, "rag/res/easyocr/onnx_converted") # Specific subdir for converted
+                os.makedirs(output_dir, exist_ok=True)
+            except Exception as e_conv_dir:
+                logging.error(f"Could not create default ONNX conversion output_dir: {e_conv_dir}. Conversion may fail or use current dir.")
+                output_dir = "." # Fallback to current directory
+
+        logging.info(f"Starting ONNX model conversion for languages: {languages_for_conversion}. Output to: {output_dir}")
+
+        try:
+            # Assuming convert_to_onnx returns: output_dir, detector_name, recognizer_name
+            converted_output_path, det_name, rec_name = convert_to_onnx(
+                languages=languages_for_conversion,
             output_dir=output_dir,
-            use_gpu=True,
+                use_gpu=conversion_use_gpu, # For conversion process
             upload_to_hf=upload_to_hf,
             hf_repo_id=hf_repo_id,
             hf_token=hf_token
         )
+            logging.info(f"ONNX Models converted: Detector='{det_name}', Recognizer='{rec_name}'. Saved in '{converted_output_path}'.")
+            # Optionally, re-initialize this EasyOCR instance to use these newly converted models
+            # For example, by setting self.use_onnx = True and loading them.
+            # This would require knowing the exact names and having a robust loading mechanism.
+            # Or, inform user to re-initialize.
+            logging.info("Please re-initialize EasyOCR instance to use newly converted ONNX models from the specified output directory.")
+            return converted_output_path
+        except Exception as e_conversion:
+            logging.error(f"ONNX model conversion failed: {e_conversion}")
+            return None
 
-        # New version returns tuple with model names
-        if isinstance(result, tuple) and len(result) == 3:
-            output_path, detector_name, recognizer_name = result
-            logging.info(f"Models converted and saved to {output_path}")
-            logging.info(f"Detector: {detector_name}, Recognizer: {recognizer_name}")
-        else:
-            output_path = result
-            logging.info(f"Models converted and saved to {output_path}")
-
-        return output_path
+# Potential alias for backward compatibility if other parts of the project import OCR from here.
+# OCR = EasyOCR
+# This should be handled by the importing module to decide which OCR class to use.
