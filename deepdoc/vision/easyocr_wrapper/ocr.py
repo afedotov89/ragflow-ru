@@ -499,71 +499,53 @@ class EasyOCR:
 
         return batch_output
 
-    def __call__(self, img, device_id=0, cls=True): # cls is unused
+    def __call__(self, img, device_id=0, cls=True):
         time_dict = {'det': 0, 'rec': 0, 'all': 0}
         if img is None:
-            return None, None, time_dict # Maintain (results, time_dict) structure for return
+            return []
 
         full_cache_key = self._generate_cache_key(img)
         if full_cache_key:
             cached_data = self._cache_get(f"call_{full_cache_key}")
             if cached_data:
-                # Expect cached_data to be (list_of_results, all_time_float)
                 res_list, all_t = cached_data
-                time_dict['all'] = all_t
-                # Approximate det/rec times if not stored, or if complex to store them from cache
-                time_dict['det'] = all_t * 0.5 # Generic approximation
-                time_dict['rec'] = all_t * 0.5
-                logging.debug(f"Full __call__ cache hit for {full_cache_key}") # Restored debug
-                return res_list, time_dict
-
+                logging.debug(f"Full __call__ cache hit for {full_cache_key}. Returning cached results list.")
+                return res_list
 
         overall_start_time = time.time()
 
-        # Detection part
-        # `detect` method returns (zip_iterator, time_dict_det)
-        # We need the boxes from the zip_iterator.
-        det_results_iter, time_dict_det = self.detect(img) # device_id passed for API compat, not used by self.detect
-        time_dict['det'] = time_dict_det['det'] # Get actual detection time
+        det_results_iter, time_dict_det = self.detect(img)
+        time_dict['det'] = time_dict_det['det']
 
-        detected_boxes = [item[0] for item in det_results_iter] # Extract boxes
+        detected_boxes = [item[0] for item in det_results_iter]
 
         if not detected_boxes:
             time_dict['all'] = time.time() - overall_start_time
-            return None, None, time_dict
+            return []
 
-        # Recognition part (on sorted boxes from `detect` which internally sorts)
-        # `detect` method already sorted the boxes.
         ocr_final_results = []
         recognition_start_time = time.time()
 
-        # Pass original BGR image to `recognize` as it handles `_ensure_rgb` and `get_rotate_crop_image`
-        for box_item in detected_boxes: # `detected_boxes` from `self.detect` are already sorted
-            rec_tuple = self.recognize(img, box_item) # `img` is original BGR
-            if rec_tuple: # If (text, confidence) is not None
-                # Defensive check for the structure of rec_tuple
+        for box_item in detected_boxes:
+            rec_tuple = self.recognize(img, box_item)
+            if rec_tuple:
                 if not isinstance(rec_tuple, tuple) or len(rec_tuple) != 2:
                     logging.error(f"EasyOCR.__call__: UNEXPECTED structure for recognition_tuple: {rec_tuple}, type: {type(rec_tuple)}. Box: {box_item}. Skipping this result.")
-                    continue # Skip this problematic result
-
-                # Further check element types if desired, e.g., text is str, confidence is float
-                # For now, the main check is that it's a 2-element tuple.
-
+                    continue
                 ocr_final_results.append((box_item, rec_tuple))
 
         time_dict['rec'] = time.time() - recognition_start_time
         time_dict['all'] = time.time() - overall_start_time
-        logging.debug(f"__call__ execution times: Det: {time_dict['det']:.4f}s, Rec: {time_dict['rec']:.4f}s, All: {time_dict['all']:.4f}s") # Restored debug
+        logging.debug(f"__call__ execution times: Det: {time_dict['det']:.4f}s, Rec: {time_dict['rec']:.4f}s, All: {time_dict['all']:.4f}s")
 
         if full_cache_key:
             self._cache_put(f"call_{full_cache_key}", (ocr_final_results, time_dict['all']))
-            logging.debug(f"Full __call__ result cached for {full_cache_key}") # Restored debug
+            logging.debug(f"Full __call__ result cached for {full_cache_key}")
 
         if not ocr_final_results:
-            return None, None, time_dict
+            return []
 
-        return ocr_final_results, time_dict
-
+        return ocr_final_results
 
     def clear_cache(self):
         with self._cache_lock:
