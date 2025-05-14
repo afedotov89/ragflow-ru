@@ -231,7 +231,7 @@ class EasyOCR:
         else:
             logging.info("Using ONNX backend for EasyOCR.")
 
-        self.drop_score = 0.5
+        self.drop_score = 0.5 # Restored to original value
         from collections import OrderedDict
         from threading import RLock
         self._max_cache_size = max_cache_size
@@ -278,28 +278,36 @@ class EasyOCR:
 
     def sorted_boxes(self, dt_boxes):
         if not dt_boxes: # Handles None or empty list
+            logging.debug("sorted_boxes: Input dt_boxes is None or empty. Returning [].")
             return []
         try:
+            logging.debug(f"sorted_boxes: Input dt_boxes (count: {len(dt_boxes)}): {dt_boxes}")
             # Ensure all elements are list/array-like for consistent access
             # And that they have at least one point with two coordinates
             if not all(isinstance(b, (list, np.ndarray)) and len(b) > 0 and isinstance(b[0], (list, np.ndarray)) and len(b[0]) == 2 for b in dt_boxes):
-                logging.warning(f"Inconsistent structure in dt_boxes for sorting. Attempting to filter valid boxes. Original: {dt_boxes}")
+                logging.warning(f"sorted_boxes: Inconsistent structure in dt_boxes for sorting. Attempting to filter valid boxes. Original: {dt_boxes}")
                 # Filter out malformed boxes before sorting
                 valid_boxes = []
-                for b in dt_boxes:
+                for idx, b in enumerate(dt_boxes):
+                    logging.debug(f"sorted_boxes: Checking box candidate [{idx}]: {b}")
                     if isinstance(b, (list, np.ndarray)) and len(b) > 0 and isinstance(b[0], (list, np.ndarray)) and len(b[0]) == 2:
-                         # Further check if all 4 points exist if that's the expectation for x[0][1]
-                         if len(b) == 4 and all(isinstance(p, (list, np.ndarray)) and len(p) == 2 for p in b):
+                         if len(b) == 4 and all(isinstance(p, (list, np.ndarray, tuple)) and len(p) == 2 for p in b):
                             valid_boxes.append(b)
-                         elif len(b) > 0 : # if it's just one point, sorting key might still work if it's [[x,y]]
-                            valid_boxes.append(b) # This might be too lenient for the key x[0][1]
+                            logging.debug(f"sorted_boxes: Box candidate [{idx}] is VALID and added: {b}")
+                         elif len(b) > 0 :
+                            valid_boxes.append(b)
+                            logging.debug(f"sorted_boxes: Box candidate [{idx}] added (lenient, not 4 points): {b}")
                     else:
-                        logging.debug(f"Skipping malformed box during sort preprocessing: {b}")
+                        logging.warning(f"sorted_boxes: Skipping malformed box candidate [{idx}] during sort preprocessing: {b}")
                 dt_boxes = valid_boxes
-                if not dt_boxes: return []
+                logging.debug(f"sorted_boxes: dt_boxes after filtering (count: {len(dt_boxes)}): {dt_boxes}")
+                if not dt_boxes:
+                    logging.debug("sorted_boxes: dt_boxes is empty after filtering. Returning [].")
+                    return []
 
             _boxes = sorted(dt_boxes, key=lambda x: (x[0][1], x[0][0])) # Initial sort
             num_boxes = len(_boxes)
+            logging.debug(f"sorted_boxes: _boxes after initial sort (count: {num_boxes}): {_boxes}")
 
             for i in range(num_boxes - 1):
                 for j in range(i, -1, -1): # Iterate backwards from i
@@ -344,13 +352,66 @@ class EasyOCR:
             boxes = self.onnx_detector.detect(img_processed) # ONNXDetector expects RGB
         else:
             try:
-                # EasyOCR Reader's `detect` method has a complex return: (horizontal_list, free_list), score
-                # Using `readtext` with detail=0 or extracting boxes from detail=1 is more straightforward
-                # for getting a list of boxes.
-                results_pytorch = self.reader.readtext(img_processed, detail=0, paragraph=False) # Returns list of boxes
-                boxes = results_pytorch # Ensure this is a list of box coordinates
+                returned_horizontal_list, returned_free_list = self.reader.detect(img_processed)
+
+                logging.debug(f"EasyOCR.detect - PyTorch backend - returned_horizontal_list (count: {len(returned_horizontal_list)}): {returned_horizontal_list}")
+                logging.debug(f"EasyOCR.detect - PyTorch backend - returned_free_list (count: {len(returned_free_list)}): {returned_free_list}")
+
+                actual_horizontal_boxes = []
+                if isinstance(returned_horizontal_list, list) and len(returned_horizontal_list) == 1 and isinstance(returned_horizontal_list[0], list):
+                    actual_horizontal_boxes = returned_horizontal_list[0]
+                    logging.debug(f"Extracted actual_horizontal_boxes from returned_horizontal_list[0]. Count: {len(actual_horizontal_boxes)}")
+                elif isinstance(returned_horizontal_list, list):
+                    actual_horizontal_boxes = returned_horizontal_list
+                    logging.debug(f"Using returned_horizontal_list directly as actual_horizontal_boxes. Count: {len(actual_horizontal_boxes)}")
+                else:
+                    logging.warning(f"returned_horizontal_list is not in an expected format: {type(returned_horizontal_list)}. Skipping horizontal boxes.")
+
+                actual_free_boxes = []
+                if isinstance(returned_free_list, list) and len(returned_free_list) == 1 and isinstance(returned_free_list[0], list):
+                    actual_free_boxes = returned_free_list[0]
+                    logging.debug(f"Extracted actual_free_boxes from returned_free_list[0]. Count: {len(actual_free_boxes)}")
+                elif isinstance(returned_free_list, list):
+                    actual_free_boxes = returned_free_list
+                    logging.debug(f"Using returned_free_list directly as actual_free_boxes. Count: {len(actual_free_boxes)}")
+                else:
+                    logging.warning(f"returned_free_list is not in an expected format: {type(returned_free_list)}. Skipping free boxes.")
+
+                processed_boxes = []
+
+                for i, hbox in enumerate(actual_horizontal_boxes):
+                    logging.debug(f"EasyOCR.detect - PyTorch - Processing horizontal_box [{i}]: {hbox}")
+                    if isinstance(hbox, (list, tuple)) and len(hbox) == 4:
+                        try:
+                            x_min, x_max, y_min, y_max = hbox
+                            four_points = [
+                                [x_min, y_min],
+                                [x_max, y_min],
+                                [x_max, y_max],
+                                [x_min, y_max]
+                            ]
+                            processed_boxes.append(four_points)
+                            logging.debug(f"EasyOCR.detect - PyTorch - Added horizontal_box [{i}]")
+                        except ValueError as ve_unpack:
+                            logging.error(f"EasyOCR.detect - PyTorch - Error unpacking horizontal_box {hbox}: {ve_unpack}. Skipping.")
+                            continue
+                    else:
+                        logging.warning(f"EasyOCR.detect - PyTorch - Unexpected item format in actual_horizontal_boxes: {hbox}. Skipping.")
+                        continue
+
+                for i, fbox in enumerate(actual_free_boxes):
+                    logging.debug(f"EasyOCR.detect - PyTorch - Processing free_box [{i}]: {fbox}")
+                    if isinstance(fbox, (list, np.ndarray)) and len(fbox) == 4 and \
+                       all(isinstance(pt, (list, np.ndarray, tuple)) and len(pt) == 2 for pt in fbox):
+                        processed_boxes.append(fbox)
+                        logging.debug(f"EasyOCR.detect - PyTorch - Added free_box [{i}]")
+                    else:
+                        logging.warning(f"EasyOCR.detect - PyTorch - Invalid format for free_box: {fbox}. Skipping.")
+                        continue
+
+                boxes = processed_boxes
             except Exception as e:
-                logging.error(f"PyTorch EasyOCR.Reader.readtext (for detection) failed: {e}")
+                logging.error(f"PyTorch EasyOCR.Reader.detect (for detection) failed: {e}")
                 boxes = []
 
         detection_time = time.time() - start_time
@@ -407,42 +468,43 @@ class EasyOCR:
         if ori_im is None or box is None: return None
 
         img_key = self._generate_cache_key(ori_im)
-        box_str = "_".join(map(str, np.array(box).astype(int).flatten())) # Consistent box string for key
+        box_str = "_".join(map(str, np.array(box).astype(int).flatten()))
         cache_key = None
         if img_key:
             cache_key = f"recognize_{img_key}_{box_str}"
             cached_val = self._cache_get(cache_key)
-            if cached_val: return cached_val
+            if cached_val:
+                logging.debug(f"Recognize CACHE HIT for box {box_str}: {cached_val}")
+                return cached_val
 
         try:
             img_crop = self.get_rotate_crop_image(ori_im, box)
-            logging.debug(f"Recognize: Cropped image shape for {box_str}: {img_crop.shape if img_crop is not None else 'None'}") # Restored debug
-        except ValueError as e: # Catch error from get_rotate_crop_image
-            logging.error(f"Failed to crop image for recognition: {e}")
+            logging.debug(f"Recognize: Cropped image shape for {box_str}: {img_crop.shape if img_crop is not None else 'None'}")
+        except ValueError as e:
+            logging.error(f"Failed to crop image for recognition for box {box_str}: {e}")
             return None
 
         if img_crop is None or img_crop.size == 0:
-            logging.warning("Cropped image for recognition is empty.")
+            logging.warning(f"Cropped image for recognition is empty for box {box_str}.")
             return None
 
-        # _ensure_rgb for PyTorch. ONNXRecognizer handles its own grayscale conversion.
-        # PyTorch Reader's recognizer also handles grayscale/RGB input.
         img_crop_processed = self._ensure_rgb(img_crop)
 
         text, confidence = "", 0.0
         if self.use_onnx and self.onnx_recognizer:
-            text = self.onnx_recognizer.recognize(img_crop_processed) # ONNXRecognizer expects RGB/Grayscale, handles internally
-            confidence = 1.0 if text else 0.0 # Basic confidence for ONNX
+            text = self.onnx_recognizer.recognize(img_crop_processed)
+            confidence = 1.0 if text else 0.0
         else:
             try:
-                # reader.recognize is complex; reader.readtext on crop is simpler
                 pt_results = self.reader.readtext(img_crop_processed, detail=1, paragraph=False)
                 if pt_results:
-                    text, confidence = pt_results[0][1], pt_results[0][2] # Get text and conf from first result
+                    text, confidence = pt_results[0][1], pt_results[0][2]
             except Exception as e:
-                logging.error(f"PyTorch EasyOCR.Reader.readtext (for recognition) failed: {e}")
+                logging.error(f"PyTorch EasyOCR.Reader.readtext (for recognition of box {box_str}) failed: {e}")
 
+        logging.debug(f"Recognize BEFORE drop_score for box {box_str}: Text='{text}', Confidence={confidence:.4f}, DropScore={self.drop_score}")
         result_tuple = (text, confidence) if confidence >= self.drop_score else None
+        logging.debug(f"Recognize AFTER drop_score for box {box_str}: ResultTuple={result_tuple}")
 
         if cache_key: self._cache_put(cache_key, result_tuple)
         return result_tuple
@@ -528,6 +590,7 @@ class EasyOCR:
 
         for box_item in detected_boxes:
             rec_tuple = self.recognize(img, box_item)
+            logging.debug(f"__call__: For box {box_item}, recognize returned: {rec_tuple}")
             if rec_tuple:
                 if not isinstance(rec_tuple, tuple) or len(rec_tuple) != 2:
                     logging.error(f"EasyOCR.__call__: UNEXPECTED structure for recognition_tuple: {rec_tuple}, type: {type(rec_tuple)}. Box: {box_item}. Skipping this result.")
