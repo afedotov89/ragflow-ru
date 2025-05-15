@@ -33,6 +33,12 @@ MINIO = {}
 OSS = {}
 OS = {}
 
+# EasyOCR settings
+easyocr_config = get_base_config("easyocr", {})
+EASYOCR_USE_ONNX = easyocr_config.get("use_onnx", True)
+EASYOCR_MAX_CACHE_SIZE = easyocr_config.get("max_cache_size", 100)
+EASYOCR_ONNX_REPO_ID = easyocr_config.get("onnx_repo_id", "afedotov/easyocr-onnx")
+
 # Initialize the selected configuration data based on environment variables to solve the problem of initialization errors due to lack of configuration
 if DOC_ENGINE == 'elasticsearch':
     ES = get_base_config("es", {})
@@ -73,6 +79,9 @@ except Exception:
 def print_rag_settings():
     logging.info(f"MAX_CONTENT_LENGTH: {DOC_MAXIMUM_SIZE}")
     logging.info(f"MAX_FILE_COUNT_PER_USER: {int(os.environ.get('MAX_FILE_NUM_PER_USER', 0))}")
+    logging.info(f"EASYOCR_USE_ONNX: {EASYOCR_USE_ONNX}")
+    logging.info(f"EASYOCR_MAX_CACHE_SIZE: {EASYOCR_MAX_CACHE_SIZE}")
+    logging.info(f"EASYOCR_ONNX_REPO_ID: {EASYOCR_ONNX_REPO_ID}")
 
 
 def get_svr_queue_name(priority: int) -> str:

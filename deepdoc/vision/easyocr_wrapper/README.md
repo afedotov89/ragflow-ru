@@ -8,32 +8,80 @@
 
 ## Overview
 
-This module (`easyocr_wrapper`) serves as a wrapper around the EasyOCR library, primarily to integrate ONNX-based inference for text detection and recognition within the DeepDoc project. The main goals are to maintain compatibility with the existing OCR interface in DeepDoc, leverage the potential performance benefits of ONNX, and ensure robust multi-language support, including Russian.
+This module (`easyocr_wrapper`) serves as a wrapper around the EasyOCR library, primarily to integrate ONNX-based inference for text detection and recognition within the DeepDoc project. The main goals are to maintain compatibility with the existing OCR interface in DeepDoc, leverage the potential performance benefits of ONNX, and ensure robust multi-language support, specifically for English and Russian.
 
 The development, particularly of the ONNX-based text detector, involved a significant amount of experimentation to replicate the post-processing logic of EasyOCR's CRAFT model and to adapt to the specific output characteristics of the converted ONNX models.
 
 ## Key Features
 
 *   **EasyOCR Compatibility:** Provides a familiar `EasyOCR` class interface.
+*   **Hardcoded Language Support:** Fixed to support only English and Russian (`'en'`, `'ru'`).
+*   **Single Recognition Model:** Uses the Cyrillic model (`cyrillic_g2`) for both English and Russian text recognition.
 *   **ONNX Inference:** Implements `ONNXDetector` and `ONNXRecognizer` classes for running EasyOCR's detection (CRAFT) and recognition models in ONNX format.
 *   **Dynamic Model Loading:** ONNX models can be loaded from a local cache or automatically downloaded from a specified Hugging Face repository.
 *   **Flexible Runtime Providers:** Supports CUDA, CoreML (though temporarily disabled during development for stability on some platforms), and CPU execution providers for ONNX Runtime.
 *   **Model Conversion Utilities:** Includes scripts and functions to convert EasyOCR's PyTorch models to the ONNX format.
+*   **Configuration Support:** ONNX usage can be configured through the `service_conf.yaml` file with settings managed in `rag/settings.py`.
 
 ## Module Components
 
 *   **`ocr.py`**:
-    *   `EasyOCR`: The main wrapper class. It initializes EasyOCR's standard PyTorch reader and then attempts to load and use ONNX models if available and `onnxruntime` is installed. It orchestrates detection and recognition, falling back to PyTorch if ONNX models fail to load or are disabled.
+    *   `EasyOCR`: The main wrapper class. It initializes EasyOCR's standard PyTorch reader with hardcoded languages (`'en'`, `'ru'`) and then attempts to load and use ONNX models if available and `onnxruntime` is installed. It orchestrates detection and recognition, falling back to PyTorch if ONNX models fail to load or are disabled.
     *   `ONNXDetector`: Handles text detection using an ONNX version of the CRAFT model. The core of recent development efforts has been to refine its post-processing logic.
-    *   `ONNXRecognizer`: Handles text recognition using ONNX versions of EasyOCR's recognition models (e.g., CRNN, VGG).
+    *   `ONNXRecognizer`: Handles text recognition using ONNX versions of EasyOCR's recognition models - specifically the `cyrillic_g2` model for both English and Russian text.
 
 *   **`converter.py`**:
     *   Provides functionalities to convert EasyOCR's PyTorch models (`.pth`) to ONNX (`.onnx`).
+    *   Uses the same hardcoded languages from `EasyOCR.LANGUAGES`.
+    *   Always uses the `cyrillic_g2` model for recognition, regardless of language settings.
     *   Includes helper functions for downloading/uploading models to/from Hugging Face Hub.
     *   Addresses various challenges encountered during ONNX export, such as handling dynamic input/output shapes and specific PyTorch operations that require workarounds for ONNX compatibility (e.g., `AdaptiveAvgPool2d`).
 
 *   **`cli.py`**:
     *   A command-line interface, primarily for triggering the model conversion process defined in `converter.py`.
+
+## Configuration
+
+The wrapper now uses the application's central configuration system. Settings are defined in `service_conf.yaml` and exposed through `rag/settings.py`:
+
+```yaml
+easyocr:
+  use_onnx: true  # Whether to use ONNX models (true/false)
+  max_cache_size: 100  # Maximum number of results to cache
+  onnx_repo_id: "afedotov/easyocr-onnx"  # Hugging Face repository ID for ONNX models
+```
+
+These settings are initialized in `rag/settings.py` as:
+- `EASYOCR_USE_ONNX`: Controls whether to use ONNX (defaults to true)
+- `EASYOCR_MAX_CACHE_SIZE`: Sets the maximum cache size (defaults to 100)
+- `EASYOCR_ONNX_REPO_ID`: Hugging Face repository ID for downloading ONNX models (defaults to "afedotov/easyocr-onnx")
+
+You can also set these values using environment variables:
+- `EASYOCR_USE_ONNX`: Control whether to use ONNX
+- `EASYOCR_MAX_CACHE_SIZE`: Set the maximum cache size
+- `EASYOCR_ONNX_REPO_ID`: Set the Hugging Face repository ID
+
+These configuration values can be overridden by passing parameters directly to the `EasyOCR` constructor.
+
+## Usage
+
+The `EasyOCR` class in `ocr.py` is designed to be a drop-in replacement (or close alternative) for the standard EasyOCR reader, but with a simplified interface. It is hardcoded to support English and Russian languages only, and uses a single recognition model for both languages. It no longer accepts a `languages` parameter in its constructor.
+
+```python
+# Import the settings
+from rag.settings import EASYOCR_USE_ONNX
+
+# Example usage (note: no languages parameter)
+# ONNX preference is read from settings.py by default
+ocr = EasyOCR(model_dir=None, use_gpu=True)  # Will use settings.EASYOCR_USE_ONNX
+
+# Or explicitly override settings:
+ocr = EasyOCR(model_dir=None, use_gpu=True, use_onnx_preference=(not EASYOCR_USE_ONNX))  # Override settings
+
+result = ocr(image)  # Process an image and get detected text with bounding boxes
+```
+
+The configuration is read from `rag/settings.py` when initializing without explicit parameter values. This makes it easier to control ONNX usage without changing code.
 
 ## ONNXDetector: In-Depth
 
@@ -113,21 +161,19 @@ The `ONNXRecognizer` takes cropped image regions (presumably containing single l
     *   Remove repeated indices.
     *   Remove blank characters.
     *   Map remaining indices to characters using a vocabulary.
+*   **Fixed Model:** The wrapper now consistently uses the `cyrillic_g2` model for both English and Russian text recognition, rather than selecting different models based on language.
 
 ## Model Conversion (`converter.py`)
 
 The `converter.py` script was developed to:
 
-1.  Load EasyOCR's PyTorch models.
+1.  Load EasyOCR's PyTorch models with hardcoded languages (`'en'`, `'ru'`).
 2.  Export them to the ONNX format using `torch.onnx.export`.
-3.  Handle dummy inputs required for the export process, including specific handling for the recognizer model which often requires two inputs (image and a text sequence tensor for teacher forcing during training, though only the image part is used for inference logic during export).
-4.  Address specific operator compatibility issues encountered during export (e.g., a ` cuello.AdaptiveAvgPool2d` in a VGG-based recognizer model required modifications to its parameters and a subsequent `squeeze` operation in the model's `forward` method to become ONNX-compatible).
-5.  Manage potential device (CPU/GPU/MPS) issues during conversion, sometimes forcing CPU for stability.
-6.  Integrate with `huggingface_hub` to upload the converted ONNX models and character list (`vocab.txt`) to a repository, and also to download them in the main `EasyOCR` wrapper if not found locally.
-
-## Usage
-
-The `EasyOCR` class in `ocr.py` is designed to be a drop-in replacement (or close alternative) for the standard EasyOCR reader. It's instantiated similarly, and its `__call__` method or `readtext` (if fully implemented) can be used to perform OCR. The `deepdoc.vision.t_ocr.py` script provides an example of its usage.
+3.  Use a single recognition model (`cyrillic_g2`) for both English and Russian text.
+4.  Handle dummy inputs required for the export process, including specific handling for the recognizer model which often requires two inputs (image and a text sequence tensor for teacher forcing during training, though only the image part is used for inference logic during export).
+5.  Address specific operator compatibility issues encountered during export (e.g., a ` cuello.AdaptiveAvgPool2d` in a VGG-based recognizer model required modifications to its parameters and a subsequent `squeeze` operation in the model's `forward` method to become ONNX-compatible).
+6.  Manage potential device (CPU/GPU/MPS) issues during conversion, sometimes forcing CPU for stability.
+7.  Integrate with `huggingface_hub` to upload the converted ONNX models and character list (`vocab.txt`) to a repository, and also to download them in the main `EasyOCR` wrapper if not found locally.
 
 ## Future Improvements
 
@@ -139,11 +185,11 @@ The `EasyOCR` class in `ocr.py` is designed to be a drop-in replacement (or clos
 ## ⚠️ Critical Note on Character List and vocab.txt
 
 - The `vocab.txt` used for ONNX model decoding is generated from `reader.character`. This ensures that the character order matches the exact order used by the model for decoding output indices.
-- A blank symbol (an empty string) is added as the first line in `vocab.txt`, corresponding to the CTC blank index (index 0).
+- A blank symbol (represented as '_' in the file) is added as the first line in `vocab.txt`, corresponding to the CTC blank index (index 0).
   Example of `vocab.txt` generation:
   ```python
   vocab = list(reader.character)
-  vocab_with_blank = [''] + vocab # Blank symbol first
+  vocab_with_blank = ['_'] + vocab # Blank symbol first
   with open('vocab.txt', 'w', encoding='utf-8') as f:
       f.write('\n'.join(vocab_with_blank))
   ```
@@ -154,16 +200,5 @@ The `EasyOCR` class in `ocr.py` is designed to be a drop-in replacement (or clos
 
 - If you see systematic symbol shifts (e.g., all letters off by one), check that you have a blank symbol as the first line in vocab.txt.
 - If you see random or nonsensical output, check that your vocab.txt was generated from `reader.character` **in the same session as ONNX export**.
-- If you use multiple languages, always set `character_list` explicitly when creating the EasyOCR Reader to avoid randomization due to Python set behavior.
+- Since the wrapper now uses a single hardcoded model, vocabulary consistency is more important than ever.
 - For best reproducibility, always save and reuse the exact vocab.txt used during ONNX export.
-
-## ONNX model and vocab.txt
-
-- The ONNX model uses a vocab.txt file generated from `reader.character`, preserving the exact order of characters as used by the model.
-- The first line in vocab.txt is a blank symbol (an empty string), corresponding to index 0 for CTC decoding.
-- This approach guarantees correct mapping between model output indices and characters during decoding.
-- Using any other character list or changing the order leads to incorrect recognition (such as shifted characters or random output).
-- For multilingual models, the `character_list` is explicitly set when creating the EasyOCR Reader to ensure reproducibility.
-- Systematic character shifts (e.g., all letters shifted by one) indicate a missing blank symbol as the first line in vocab.txt.
-- Random or nonsensical output may indicate that vocab.txt was not generated from `reader.character` or does not match the model used for ONNX export.
-- For reproducibility, the exact vocab.txt used during ONNX export is saved and reused.

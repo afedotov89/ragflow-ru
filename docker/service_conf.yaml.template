@@ -28,6 +28,10 @@ redis:
   db: 1
   password: '${REDIS_PASSWORD:-infini_rag_flow}'
   host: '${REDIS_HOST:-redis}:6379'
+easyocr:
+  use_onnx: ${EASYOCR_USE_ONNX:-true}
+  max_cache_size: ${EASYOCR_MAX_CACHE_SIZE:-100}
+  onnx_repo_id: ${EASYOCR_ONNX_REPO_ID:-afedotov/easyocr-onnx}
 
 # postgres:
 #   name: '${POSTGRES_DBNAME:-rag_flow}'

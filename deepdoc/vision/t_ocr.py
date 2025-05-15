@@ -36,6 +36,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0' #1 gpu
 
 
 def main(args):
+
     import torch.cuda
 
     cuda_devices = torch.cuda.device_count()
@@ -90,4 +91,5 @@ if __name__ == "__main__":
     parser.add_argument('--output_dir', help="Directory where to store the output images. Default: './ocr_outputs'",
                         default="./ocr_outputs")
     args = parser.parse_args()
+
     main(args)

@@ -1,9 +1,6 @@
 #
-# Copyright (c) 2024 Alexander Fedotov
-#
-# Based on work from InfiniFlow/deepdoc project
+# Based on work from InfiniFlow project
 # This file was created by Alexander Fedotov as an extension to the original project
-# (Assisted by AI)
 # Licensed under the Apache License, Version 2.0
 #
 
@@ -52,16 +49,8 @@ class ONNXDetector:
 
         # Define input and output shapes
         logging.info(f"Detector input shape: {self.input_shape}")
-        # Extract target height and width from model's input shape
-        # Assuming shape is [batch_size, channels, height, width]
-        try:
-            self.model_input_height = int(self.input_shape[2])
-            self.model_input_width = int(self.input_shape[3])
-            logging.info(f"Using detector model input size: {self.model_input_height}x{self.model_input_width}")
-        except (TypeError, IndexError, ValueError) as e:
-            logging.warning(f"Could not determine fixed H, W from input_shape {self.input_shape}. Falling back to 640x640. Error: {e}")
-            self.model_input_height = 640
-            self.model_input_width = 640
+        self.model_input_height = 640
+        self.model_input_width = 640
 
         # Configuration for detection based on EasyOCR defaults
         # EXPERIMENTING with thresholds again due to model output characteristics
@@ -69,7 +58,6 @@ class ONNXDetector:
         self.text_threshold = 0.65 # EXPERIMENTAL: Default 0.7, slightly lowered with dilation
         self.low_text = 0.6        # Reverting to a previously better value for initial segmentation
         self.link_threshold = 0.55 # Reverting to a previously better value for initial segmentation
-        logging.warning(f"ONNXDetector: USING EXPERIMENTAL THRESHOLDS (round 4) with DILATION: low_text={self.low_text}, link_threshold={self.link_threshold}, text_threshold={self.text_threshold}")
 
     def detect(self, image):
         """

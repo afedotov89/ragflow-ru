@@ -32,23 +32,16 @@ def draw_boxes(image, boxes_info, output_path=None):
         boxes_info: List of (box, (text, confidence)) tuples
         output_path: Path to save the image with boxes
     """
-    # Create a copy of the image
     img_boxes = image.copy()
 
-    # Draw boxes
     for box, (text, confidence) in boxes_info:
-        # Convert box to numpy array
         box = np.array(box, dtype=np.int32)
-
-        # Draw the box
         cv2.polylines(img_boxes, [box], True, (0, 255, 0), 2)
 
-        # Add text
         x, y = box[0]
         cv2.putText(img_boxes, f"{text} ({confidence:.2f})", (x, y - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-    # Save or display the image
     if output_path:
         cv2.imwrite(output_path, img_boxes)
         logging.info(f"Image with boxes saved to {output_path}")
@@ -72,14 +65,12 @@ def benchmark(ocr, image_paths, repeat=5):
     total_images = 0
 
     for image_path in image_paths:
-        # Load image
         logging.info(f"Processing image: {image_path}")
         img = cv2.imread(image_path)
         if img is None:
             logging.warning(f"Failed to load image: {image_path}")
             continue
 
-        # Run OCR multiple times
         times = []
         for i in range(repeat):
             start_time = time.time()
@@ -87,7 +78,6 @@ def benchmark(ocr, image_paths, repeat=5):
             end_time = time.time()
             times.append(end_time - start_time)
 
-        # Report results
         avg_time = sum(times) / len(times)
         logging.info(f"Image: {os.path.basename(image_path)}")
         logging.info(f"Average time: {avg_time:.4f} seconds")
@@ -97,7 +87,6 @@ def benchmark(ocr, image_paths, repeat=5):
         total_time += avg_time
         total_images += 1
 
-        # First time includes model loading, subsequent times are more representative
         if repeat > 1:
             avg_inference_time = sum(times[1:]) / len(times[1:])
             logging.info(f"Average inference time (excluding first run): {avg_inference_time:.4f} seconds")
@@ -146,15 +135,10 @@ def main():
     benchmark_parser.add_argument("--use-gpu", action="store_true", help="Use GPU for inference")
     benchmark_parser.add_argument("--use-onnx", action="store_true", help="Use ONNX models")
 
-    # Parse arguments
     args = parser.parse_args()
-
-    # Setup logging
     setup_logging()
 
-    # Run command
     if args.command == "convert":
-        # Convert EasyOCR models to ONNX
         output_dir = convert_to_onnx(
             languages=args.languages,
             output_dir=args.output_dir,
@@ -166,7 +150,6 @@ def main():
         logging.info(f"Models converted and saved to {output_dir}")
 
     elif args.command == "download":
-        # Download ONNX models from Hugging Face
         output_dir = download_models_from_hf(
             repo_id=args.repo_id,
             local_dir=args.output_dir
@@ -174,43 +157,36 @@ def main():
         logging.info(f"Models downloaded to {output_dir}")
 
     elif args.command == "test":
-        # Test OCR on image
         ocr = EasyOCR(
             languages=args.languages,
             use_gpu=args.use_gpu,
             use_onnx=args.use_onnx
         )
 
-        # Load image
         img = cv2.imread(args.image)
         if img is None:
             logging.error(f"Failed to load image: {args.image}")
             return
 
-        # Run OCR
         start_time = time.time()
         results = ocr(img)
         end_time = time.time()
 
-        # Print results
         logging.info(f"OCR completed in {end_time - start_time:.4f} seconds")
         logging.info(f"Found {len(results)} text regions:")
 
         for i, (box, (text, confidence)) in enumerate(results):
             logging.info(f"{i+1}. Text: {text}, Confidence: {confidence:.4f}, Box: {box}")
 
-        # Draw boxes on image
         draw_boxes(img, results, args.output)
 
     elif args.command == "benchmark":
-        # Benchmark OCR performance
         ocr = EasyOCR(
             languages=args.languages,
             use_gpu=args.use_gpu,
             use_onnx=args.use_onnx
         )
 
-        # Get image paths
         image_paths = []
         for root, _, files in os.walk(args.images_dir):
             for file in files:
@@ -222,8 +198,6 @@ def main():
             return
 
         logging.info(f"Found {len(image_paths)} images")
-
-        # Run benchmark
         benchmark(ocr, image_paths, args.repeat)
 
     else:

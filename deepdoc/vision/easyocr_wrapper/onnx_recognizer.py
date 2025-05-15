@@ -1,9 +1,6 @@
 #
-# Copyright (c) 2024 Alexander Fedotov
-#
-# Based on work from InfiniFlow/deepdoc project
+# Based on work from InfiniFlow project
 # This file was created by Alexander Fedotov as an extension to the original project
-# (Assisted by AI)
 # Licensed under the Apache License, Version 2.0
 #
 
@@ -128,7 +125,8 @@ class ONNXRecognizer:
         # Decode predictions
         text = self._decode_prediction(preds_onnx)
 
-        return text
+        confidence = 1.0 if text else 0.0
+        return text, confidence
 
     def _decode_prediction(self, prediction):
         """
