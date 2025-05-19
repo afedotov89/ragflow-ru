@@ -87,8 +87,8 @@ class EasyOCR:
     # Standard detector model name - typically everyone uses the same CRAFT detector
     DETECTOR_MODEL = "craft_mlt_25k"
 
-    # Упрощенная версия с единой моделью для en и ru
-    RECOGNIZER_MODEL = "cyrillic_g2"  # Одна модель для русского и английского
+    # Simplified version with a single model for en and ru
+    RECOGNIZER_MODEL = "cyrillic_g2"  # One model for Russian and English
 
     @classmethod
     def get_detector_onnx_name(cls):
@@ -99,12 +99,12 @@ class EasyOCR:
     def get_recognizer_onnx_name(cls):
         """
         Get standardized recognizer ONNX model name
-        Используем cyrillic_g2 для распознавания и русского, и английского текста
+        We use cyrillic_g2 for recognizing both Russian and English text
 
         Returns:
             Name of the recognizer ONNX model file
         """
-        return f"{cls.RECOGNIZER_MODEL}.onnx"  # Всегда возвращаем cyrillic_g2.onnx
+        return f"{cls.RECOGNIZER_MODEL}.onnx"  # Always return cyrillic_g2.onnx
 
     def __init__(self, model_dir=None, use_gpu=True, use_onnx_preference=None, max_cache_size=None):
         """
@@ -165,7 +165,7 @@ class EasyOCR:
 
         logging.info(f"Initializing EasyOCR.Reader (PyTorch backend) with languages {languages}, GPU={pytorch_use_gpu}, model_storage_directory='{pth_model_storage_directory if pth_model_storage_directory else 'EasyOCR default'}'")
         self.reader = easyocr.Reader(
-            lang_list=languages, # Используем захардкоженные языки
+            lang_list=languages, # Use hardcoded languages
             gpu=pytorch_use_gpu,
             model_storage_directory=pth_model_storage_directory,
             download_enabled=True,
@@ -183,10 +183,10 @@ class EasyOCR:
         # Determine ONNX model names using the centralized constants and helpers
         detector_onnx_filename = self.get_detector_onnx_name()
         recognizer_onnx_filename = self.get_recognizer_onnx_name()
-        logging.info(f"Using standardized ONNX model names - Detector: '{detector_onnx_filename}', Recognizer: '{recognizer_onnx_filename}'")
 
         if self._use_onnx_preference:
             logging.info("Attempting to initialize ONNX backend.")
+            logging.info(f"Using standardized ONNX model names - Detector: '{detector_onnx_filename}', Recognizer: '{recognizer_onnx_filename}'")
             try:
                 import onnxruntime as ort # Check if onnxruntime is available
                 from .converter import download_models_from_hf # For downloading
@@ -211,7 +211,6 @@ class EasyOCR:
                     try:
                         # This should download to onnx_model_dir_specific or a subdir within it.
                         # Ensure download_models_from_hf returns the effective directory.
-                        effective_download_dir = download_models_from_hf(EASYOCR_ONNX_REPO_ID, local_dir=onnx_model_dir_specific)
                         # Update paths if download_models_from_hf changed the structure (e.g. by creating repo-named subdir)
                         # For simplicity, assume download_models_from_hf places them into onnx_model_dir_specific directly
                         # or that load_onnx_model can find them within effective_download_dir.
@@ -391,16 +390,15 @@ class EasyOCR:
                 time_dict['det'] = detection_time
                 time_dict['all'] = detection_time
                 logging.debug(f"Cache hit for detect: {cache_key}")
-                # Original returned zip(boxes, [("",0.0)...]), now just boxes.
-                # The caller __call__ will handle combining with recognition results.
-                return sorted_boxes_list, time_dict
+                # Для совместимости с deepdoc/vision/ocr.py возвращаем zip объект в том же формате
+                return zip(sorted_boxes_list, [("", 0.0) for _ in range(len(sorted_boxes_list))])
 
         start_time = time.time()
         # Ensure image is RGB, as both PyTorchDetector and ONNXDetector might expect it
         # (though ONNXDetector internally handles normalization for 3-channel).
         img_rgb = self._ensure_rgb(img)
         if img_rgb is None:
-            return [], time_dict
+            return []
 
         # Delegate to the configured detector
         detected_boxes = self.detector.detect(img_rgb)
@@ -416,8 +414,8 @@ class EasyOCR:
             logging.debug(f"Caching result for detect: {cache_key}")
             self._cache_put(f"detect_{cache_key}", (sorted_boxes_list, detection_time))
 
-        # Return only boxes and time_dict. __call__ will pair with recognition results.
-        return sorted_boxes_list, time_dict
+        # Возвращаем в формате, совместимом с deepdoc/vision/ocr.py
+        return zip(sorted_boxes_list, [("", 0.0) for _ in range(len(sorted_boxes_list))])
 
     def get_rotate_crop_image(self, img, points):
         if img is None or points is None:
@@ -527,7 +525,9 @@ class EasyOCR:
                 cached_crop_res = self._cache_get(f"rec_batch_crop_{key_crop_batch}")
 
             if cached_crop_res:
-                batch_output.append(cached_crop_res) # cached_crop_res is (text, conf) or None
+                # Если в кеше уже есть результат, извлекаем текст или возвращаем пустую строку
+                text = cached_crop_res[0] if cached_crop_res else ""
+                batch_output.append(text)
                 continue
 
             # Call the backend recognizer directly
@@ -541,7 +541,10 @@ class EasyOCR:
 
             if key_crop_batch:
                 self._cache_put(f"rec_batch_crop_{key_crop_batch}", final_crop_result)
-            batch_output.append(final_crop_result)
+
+            # Для совместимости с pdf_parser.py возвращаем только текст
+            # pdf_parser ожидает строку, а не кортеж (текст, уверенность)
+            batch_output.append(current_text if current_conf >= self.drop_score else "")
 
         return batch_output
 
@@ -565,41 +568,36 @@ class EasyOCR:
 
         overall_start_time = time.time()
 
-        # 1. Detect boxes
-        # self.detect now returns (sorted_boxes_list, time_dict_det_component)
-        detected_boxes, time_dict_det_component = self.detect(img)
-        time_dict['det'] = time_dict_det_component['det'] # Store detection time
+        # 1. Detect boxes - now detect returns a zip object, not a tuple
+        detected_boxes = self.detect(img)
 
-        if not detected_boxes:
+        # Превращаем итератор в список
+        detected_boxes_list = list(detected_boxes)
+
+        if not detected_boxes_list:
             time_dict['all'] = time.time() - overall_start_time
             if full_cache_key: self._cache_put(f"call_{full_cache_key}", ([], time_dict['all']))
             return []
 
-        # 2. Recognize text in each box
+        # 2. Recognize text in each box - using our own recognize implementation
         ocr_final_results = []
         recognition_start_time = time.time()
 
-        for box_item in detected_boxes:
+        for box, (_, _) in detected_boxes_list:
             # self.recognize handles cropping, backend call, drop_score, and its own caching
-            # It returns (text, confidence) or None
-            rec_tuple = self.recognize(img, box_item) # Pass original image and box
+            rec_tuple = self.recognize(img, box) # Pass original image and box
 
-            logging.debug(f"__call__: For box {box_item}, recognize returned: {rec_tuple}")
-            if rec_tuple: # If not None (i.e., confidence was >= drop_score)
-                if not isinstance(rec_tuple, tuple) or len(rec_tuple) != 2:
-                    logging.error(f"EasyOCR.__call__: UNEXPECTED structure for rec_tuple: {rec_tuple}. Box: {box_item}. Skipping.")
-                    continue
-                # Ensure box_item is in list format for the final result, not numpy array
-                box_to_store = np.array(box_item).tolist() if isinstance(box_item, np.ndarray) else box_item
-                ocr_final_results.append((box_to_store, rec_tuple))
+            # Если распознавание вернуло результат, добавить в итоговый список
+            if rec_tuple:
+                text, confidence = rec_tuple
+                box_to_store = box.tolist() if isinstance(box, np.ndarray) else box
+                ocr_final_results.append((box_to_store, (text, confidence)))
 
         time_dict['rec'] = time.time() - recognition_start_time
         time_dict['all'] = time.time() - overall_start_time
-        logging.debug(f"__call__ execution times: Det: {time_dict['det']:.4f}s, Rec: {time_dict['rec']:.4f}s, All: {time_dict['all']:.4f}s")
 
         if full_cache_key:
             self._cache_put(f"call_{full_cache_key}", (ocr_final_results, time_dict['all']))
-            logging.debug(f"Full __call__ result cached for {full_cache_key}")
 
         return ocr_final_results
 
@@ -649,6 +647,69 @@ class EasyOCR:
         except Exception as e_conversion:
             logging.error(f"ONNX model conversion failed: {e_conversion}", exc_info=True)
             return None
+
+    def recognize_text(self, img, min_confidence=None, paragraph=False, return_boxes=False):
+        """
+        Simple method for text recognition from an image.
+        Performs detection and recognition in a single method and returns the recognized text.
+
+        Args:
+            img: Input image (numpy array, BGR or RGB)
+            min_confidence: Minimum confidence threshold for including a result (if None, uses self.drop_score)
+            paragraph: Merge text into paragraphs (True) or keep as separate lines (False)
+            return_boxes: If True, return list of dicts with box/text/confidence (for lines) or box/text (for paragraphs)
+
+        Returns:
+            str: Recognized text (all lines joined with line breaks) if return_boxes is False
+            list: List of dicts with box/text/confidence if return_boxes is True
+        """
+        if self._use_onnx_preference:
+            raise NotImplementedError("ONNX recognition is not implemented yet")
+
+        if img is None:
+            return [] if return_boxes else ""
+
+        img_rgb = self._ensure_rgb(img)
+        cache_key = self._generate_cache_key(img_rgb)
+        if cache_key and not return_boxes:
+            cached_result = self._cache_get(f"recognize_text_{cache_key}_{paragraph}")
+            if cached_result:
+                logging.debug(f"Cache hit for recognize_text: {cache_key}")
+                return cached_result
+
+        confidence_threshold = self.drop_score if min_confidence is None else min_confidence
+        try:
+            start_time = time.time()
+            results = self.reader.readtext(img_rgb, paragraph=paragraph)
+            duration = time.time() - start_time
+            logging.debug(f"Native EasyOCR readtext took {duration:.3f} seconds, returned {len(results)} results")
+
+            if return_boxes:
+                if paragraph:
+                    # results: [ [box, text], ... ]
+                    return [
+                        {"box": r[0], "text": r[1]}
+                        for r in results if len(r) >= 2
+                    ]
+                else:
+                    # results: [ [box, text, confidence], ... ]
+                    return [
+                        {"box": r[0], "text": r[1], "confidence": r[2]}
+                        for r in results if len(r) >= 3 and r[2] >= confidence_threshold
+                    ]
+            # Old behavior (text only)
+            if paragraph:
+                filtered_texts = [r[1] for r in results if len(r) >= 2]
+            else:
+                filtered_texts = [r[1] for r in results if len(r) >= 3 and r[2] >= confidence_threshold]
+            result_text = "\n".join(filtered_texts).rstrip("\n")
+
+            if cache_key and not return_boxes:
+                self._cache_put(f"recognize_text_{cache_key}_{paragraph}", result_text)
+            return result_text
+        except Exception as e:
+            logging.error(f"Error in recognize_text: {e}", exc_info=True)
+            return [] if return_boxes else ""
 
 # Potential alias for backward compatibility if other parts of the project import OCR from here.
 # OCR = EasyOCR

@@ -294,8 +294,42 @@ class RAGFlowPdfParser:
                 b["SP"] = ii
 
     def __ocr(self, pagenum, img, chars, ZM=3, device_id: int | None = None):
+        img_np = np.array(img)
+
+        if hasattr(self.ocr, "recognize_text"):
+            try:
+                results = self.ocr.recognize_text(img_np, paragraph=True, return_boxes=True)
+                if results and isinstance(results, list):
+                    boxes = []
+                    for r in results:
+                        if not r.get("text"): continue
+                        box = r["box"]
+                        xs = [pt[0] for pt in box]
+                        ys = [pt[1] for pt in box]
+                        x0, x1 = min(xs), max(xs)
+                        top, bottom = min(ys), max(ys)
+                        # Гарантируем валидность бокса
+                        if x1 <= x0 or bottom <= top:
+                            continue  # некорректный бокс, пропускаем
+
+                        boxes.append({
+                            "text": r["text"],
+                            "page_number": pagenum,
+                            "x0": x0 / ZM,
+                            "x1": x1 / ZM,
+                            "top": top / ZM,
+                            "bottom": bottom / ZM
+                        })
+                    if boxes:
+                        self.boxes.append(boxes)
+                        return
+            except NotImplementedError:
+                pass
+            except Exception as e:
+                logging.warning(f"EasyOCR recognize_text failed: {e}, fallback to box-wise OCR.")
+
         start = timer()
-        bxs = self.ocr.detect(np.array(img), device_id)
+        bxs = self.ocr.detect(img_np, device_id)
         logging.info(f"__ocr detecting boxes of a image cost ({timer() - start}s)")
 
         start = timer()
@@ -332,7 +366,6 @@ class RAGFlowPdfParser:
         logging.info(f"__ocr sorting {len(chars)} chars cost {timer() - start}s")
         start = timer()
         boxes_to_reg = []
-        img_np = np.array(img)
         for b in bxs:
             if not b["text"]:
                 left, right, top, bott = b["x0"] * ZM, b["x1"] * \

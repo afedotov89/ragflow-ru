@@ -706,5 +706,26 @@ class OCR:
 
         return list(zip([a.tolist() for a in filter_boxes], filter_rec_res))
 
+    def recognize_text(self, img, min_confidence=None, paragraph=False):
+        """
+        Simple method for text recognition from an image.
+        Not implemented in the original OCR class, use EasyOCR instead.
+
+        Args:
+            img: Input image (numpy array, BGR or RGB)
+            min_confidence: Minimum confidence threshold for including a result
+            paragraph: Merge text into paragraphs (True) or keep as separate lines (False)
+
+        Returns:
+            str: Recognized text
+
+        Raises:
+            NotImplementedError: This method is only available in EasyOCR
+        """
+        raise NotImplementedError(
+            "The recognize_text method is only available in the EasyOCR class. "
+            "Please use: from deepdoc.vision.easyocr_wrapper.ocr import EasyOCR"
+        )
+
 
 OCR = EasyOCR
